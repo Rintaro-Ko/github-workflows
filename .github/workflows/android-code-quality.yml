@@ -1,0 +1,37 @@
+name: Reusable Android Code Quality
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        default: '17'
+        type: string
+      java-distribution:
+        description: 'Java distribution'
+        default: 'temurin'
+        type: string
+
+jobs:
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK ${{ inputs.java-version }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.java-distribution }}
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Ktlint Check
+      run: ./gradlew ktlintCheck
+
+    - name: Android Lint
+      run: ./gradlew lintDebug

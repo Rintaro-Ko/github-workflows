@@ -1,0 +1,19 @@
+# MyTeslaWearApp での使用例
+# このファイルを .github/workflows/ci.yml としてコピーしてください
+
+name: Android CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  ci:
+    uses: <your-username>/github-workflows/.github/workflows/android-ci-full.yml@main
+    with:
+      java-version: '17'
+      deploy-module: 'mobile'        # MyTeslaWearAppの場合
+      deploygate-owner: 'Rintaro137'
+    secrets: inherit

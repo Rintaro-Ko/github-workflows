@@ -1,0 +1,111 @@
+name: Reusable Android Deploy to DeployGate
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        default: '17'
+        type: string
+      java-distribution:
+        description: 'Java distribution'
+        default: 'temurin'
+        type: string
+      module-name:
+        description: 'Gradle module name (e.g., app, mobile, wear)'
+        default: 'app'
+        type: string
+      build-type:
+        description: 'Build type (debug or release)'
+        default: 'debug'
+        type: string
+      deploygate-owner:
+        description: 'DeployGate owner name'
+        required: true
+        type: string
+    secrets:
+      DEPLOYGATE_API_KEY:
+        required: true
+      KEYSTORE_BASE64:
+        required: false
+      KEYSTORE_PASSWORD:
+        required: false
+      KEY_ALIAS:
+        required: false
+      KEY_PASSWORD:
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy to DeployGate
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check Release Secrets (for release builds)
+      if: ${{ inputs.build-type == 'release' }}
+      run: |
+        if [ -z "$KEYSTORE_BASE64" ]; then
+          echo "::warning::KEYSTORE_BASE64 secret is not set. Skipping release build."
+          echo "SKIP_BUILD=true" >> $GITHUB_ENV
+        else
+          echo "SKIP_BUILD=false" >> $GITHUB_ENV
+        fi
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
+    - uses: actions/checkout@v4
+      if: ${{ inputs.build-type == 'debug' || env.SKIP_BUILD != 'true' }}
+
+    - name: Set up JDK ${{ inputs.java-version }}
+      if: ${{ inputs.build-type == 'debug' || env.SKIP_BUILD != 'true' }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.java-distribution }}
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      if: ${{ inputs.build-type == 'debug' || env.SKIP_BUILD != 'true' }}
+      run: chmod +x gradlew
+
+    # Debug build
+    - name: Build Debug APK
+      if: ${{ inputs.build-type == 'debug' }}
+      run: ./gradlew :${{ inputs.module-name }}:assembleDebug
+
+    - name: Upload Debug to DeployGate
+      if: ${{ inputs.build-type == 'debug' }}
+      uses: DeployGate/deploygate-upload-github-action@v1.1.1
+      with:
+        api_token: ${{ secrets.DEPLOYGATE_API_KEY }}
+        owner_name: ${{ inputs.deploygate-owner }}
+        file_path: ${{ inputs.module-name }}/build/outputs/apk/debug/${{ inputs.module-name }}-debug.apk
+        message: "[Debug] ${{ inputs.module-name }} - ${{ github.sha }}"
+
+    # Release build
+    - name: Decode Keystore
+      if: ${{ inputs.build-type == 'release' && env.SKIP_BUILD != 'true' }}
+      run: |
+        echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > ${{ github.workspace }}/keystore.jks
+
+    - name: Build Release APK
+      if: ${{ inputs.build-type == 'release' && env.SKIP_BUILD != 'true' }}
+      run: ./gradlew :${{ inputs.module-name }}:assembleRelease
+      env:
+        KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    - name: Upload Release to DeployGate
+      if: ${{ inputs.build-type == 'release' && env.SKIP_BUILD != 'true' }}
+      uses: DeployGate/deploygate-upload-github-action@v1.1.1
+      with:
+        api_token: ${{ secrets.DEPLOYGATE_API_KEY }}
+        owner_name: ${{ inputs.deploygate-owner }}
+        file_path: ${{ inputs.module-name }}/build/outputs/apk/release/${{ inputs.module-name }}-release.apk
+        message: "[Release] ${{ inputs.module-name }} - ${{ github.sha }}"
+
+    - name: Clean up Keystore
+      if: ${{ always() && inputs.build-type == 'release' && env.SKIP_BUILD != 'true' }}
+      run: rm -f ${{ github.workspace }}/keystore.jks

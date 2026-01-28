@@ -1,0 +1,68 @@
+name: Reusable Android Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        default: '17'
+        type: string
+      java-distribution:
+        description: 'Java distribution'
+        default: 'temurin'
+        type: string
+      run-owasp:
+        description: 'Run OWASP Dependency Check'
+        default: true
+        type: boolean
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up JDK ${{ inputs.java-version }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.java-distribution }}
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    # Secret Detection - Check for hardcoded secrets
+    - name: Secret Detection (Gitleaks)
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+
+    # OWASP Dependency Check - Vulnerability scanning for dependencies
+    - name: OWASP Dependency Check
+      if: ${{ inputs.run-owasp }}
+      run: |
+        ./gradlew dependencyCheckAnalyze || echo "Dependency check completed with warnings"
+      continue-on-error: true
+
+    # Android Lint with Security Focus
+    - name: Android Security Lint
+      run: ./gradlew lintDebug
+
+    - name: Upload Security Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          **/build/reports/dependency-check-report.html
+          **/build/reports/lint-results-*.html
+        retention-days: 14

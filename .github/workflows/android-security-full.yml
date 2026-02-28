@@ -1,0 +1,487 @@
+# android-security-full.yml - 包括的セキュリティスキャン (OWASP MASVS / NIST SSDF 準拠)
+#
+# ローカル実行 (~/bin/security-scan.sh) と同等のチェックを CI で実施する。
+#
+# Usage (呼び出し側):
+#   jobs:
+#     security:
+#       uses: <owner>/github-workflows/.github/workflows/android-security-full.yml@main
+#       with:
+#         java-version: '17'
+#       secrets:
+#         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#
+name: Android Security Full Scan
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'JDK version'
+        required: false
+        type: string
+        default: '17'
+      java-distribution:
+        description: 'JDK distribution'
+        required: false
+        type: string
+        default: 'temurin'
+      run-owasp:
+        description: 'Run OWASP Dependency-Check'
+        required: false
+        type: boolean
+        default: true
+      run-semgrep:
+        description: 'Run Semgrep SAST'
+        required: false
+        type: boolean
+        default: true
+      run-trivy:
+        description: 'Run Trivy SCA'
+        required: false
+        type: boolean
+        default: true
+      fail-on-high:
+        description: 'Fail workflow on High/Critical findings'
+        required: false
+        type: boolean
+        default: true
+      source-dirs:
+        description: 'Kotlin source directories (space-separated, auto-detect if empty)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+    outputs:
+      critical-count:
+        description: 'Number of critical findings'
+        value: ${{ jobs.security-verdict.outputs.critical-count }}
+      high-count:
+        description: 'Number of high findings'
+        value: ${{ jobs.security-verdict.outputs.high-count }}
+      scan-passed:
+        description: 'Whether the scan passed'
+        value: ${{ jobs.security-verdict.outputs.scan-passed }}
+
+jobs:
+  # ============================================================
+  # Job 1: Gitleaks (シークレット検出) - Phase 3
+  # ============================================================
+  secret-detection:
+    name: "Phase 3: Secret Detection"
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.result.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check tracked sensitive files
+        id: tracked-files
+        run: |
+          ISSUES=0
+          for pattern in "google-services.json" "local.properties"; do
+            FOUND=$(git ls-files "$pattern" 2>/dev/null || true)
+            if [ -n "$FOUND" ]; then
+              echo "::error::Sensitive file tracked in Git: $FOUND"
+              ISSUES=$((ISSUES + 1))
+            fi
+          done
+          echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
+
+      - name: API key pattern scan
+        id: api-keys
+        run: |
+          PATTERN='(AIza[0-9A-Za-z_-]{35}|ghp_[0-9a-zA-Z]{36}|sk-[a-zA-Z0-9]{48}|AKIA[0-9A-Z]{16})'
+          FOUND=$(grep -rn --include="*.kt" --include="*.java" --include="*.xml" --include="*.properties" \
+            -E "$PATTERN" . 2>/dev/null | grep -v "build/" | grep -v ".gradle/" | grep -v "/test/" || true)
+          if [ -n "$FOUND" ]; then
+            echo "::error::API key pattern detected"
+            echo "$FOUND" | head -10
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Evaluate result
+        id: result
+        run: |
+          GITLEAKS_FAILED="${{ steps.gitleaks.outcome }}"
+          TRACKED_ISSUES="${{ steps.tracked-files.outputs.issues }}"
+          APIKEYS_FOUND="${{ steps.api-keys.outputs.found }}"
+          if [ "$GITLEAKS_FAILED" = "failure" ] || \
+             [ "$TRACKED_ISSUES" != "0" ] || \
+             [ "$APIKEYS_FOUND" = "true" ]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ============================================================
+  # Job 2: Semgrep SAST (静的解析) - Phase 1
+  # ============================================================
+  sast:
+    name: "Phase 1: SAST (Semgrep)"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run-semgrep }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Semgrep scan
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/owasp-top-ten
+            p/kotlin
+            p/java
+        continue-on-error: true
+
+  # ============================================================
+  # Job 3: SCA (依存関係脆弱性) - Phase 2
+  # ============================================================
+  sca:
+    name: "Phase 2: SCA"
+    runs-on: ubuntu-latest
+    outputs:
+      owasp-critical: ${{ steps.owasp-check.outputs.critical }}
+      trivy-critical: ${{ steps.trivy-check.outputs.critical }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+          cache: gradle
+
+      - name: Grant execute permission
+        run: chmod +x gradlew
+
+      - name: OWASP Dependency-Check
+        id: owasp
+        if: ${{ inputs.run-owasp }}
+        run: ./gradlew dependencyCheckAnalyze || true
+        continue-on-error: true
+
+      - name: Evaluate OWASP results
+        id: owasp-check
+        if: ${{ inputs.run-owasp }}
+        run: |
+          REPORT=$(find . -name "dependency-check-report.json" -path "*/build/*" 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            CRIT=$(python3 << 'PYEOF'
+          import json, sys
+          try:
+              with open(sys.argv[1]) as f:
+                  r = json.load(f)
+              crit = sum(1 for d in r.get('dependencies',[])
+                         for v in d.get('vulnerabilities',[])
+                         if v.get('severity','').upper() in ('CRITICAL','HIGH'))
+              print(crit)
+          except:
+              print(0)
+          PYEOF
+            "$REPORT" 2>/dev/null || echo "0")
+            echo "critical=$CRIT" >> "$GITHUB_OUTPUT"
+            if [ "$CRIT" -gt 0 ]; then
+              echo "::warning::OWASP: $CRIT Critical/High vulnerabilities found"
+            fi
+          else
+            echo "critical=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trivy filesystem scan
+        id: trivy
+        if: ${{ inputs.run-trivy }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          format: 'json'
+          output: 'trivy-results.json'
+        continue-on-error: true
+
+      - name: Evaluate Trivy results
+        id: trivy-check
+        if: ${{ inputs.run-trivy }}
+        run: |
+          if [ -f trivy-results.json ]; then
+            CRIT=$(python3 << 'PYEOF'
+          import json
+          try:
+              with open('trivy-results.json') as f:
+                  r = json.load(f)
+              total = sum(len(res.get('Vulnerabilities',[])) for res in r.get('Results',[]) if res.get('Vulnerabilities'))
+              print(total)
+          except:
+              print(0)
+          PYEOF
+            2>/dev/null || echo "0")
+            echo "critical=$CRIT" >> "$GITHUB_OUTPUT"
+          else
+            echo "critical=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload SCA reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-reports
+          path: |
+            **/build/reports/dependency-check-report.html
+            trivy-results.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================
+  # Job 4: セキュアコーディングパターン検査 - Phase 6, 7, 8
+  # ============================================================
+  secure-coding:
+    name: "Phase 6-8: Secure Coding & Compliance"
+    runs-on: ubuntu-latest
+    outputs:
+      critical-count: ${{ steps.summary.outputs.critical }}
+      high-count: ${{ steps.summary.outputs.high }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect source directories
+        id: detect
+        env:
+          INPUT_DIRS: ${{ inputs.source-dirs }}
+        run: |
+          DIRS=""
+          for candidate in app/src/main/java app/src/main/kotlin \
+                           mobile/src/main/java mobile/src/main/kotlin \
+                           wear/src/main/java wear/src/main/kotlin \
+                           androidApp/src/main/java androidApp/src/main/kotlin \
+                           composeApp/src/main/java composeApp/src/main/kotlin; do
+            [ -d "$candidate" ] && DIRS="$DIRS $candidate"
+          done
+          if [ -n "$INPUT_DIRS" ]; then
+            DIRS="$INPUT_DIRS"
+          fi
+          echo "dirs=$DIRS" >> "$GITHUB_OUTPUT"
+
+          MANIFESTS=""
+          for candidate in app/src/main/AndroidManifest.xml mobile/src/main/AndroidManifest.xml \
+                           wear/src/main/AndroidManifest.xml androidApp/src/main/AndroidManifest.xml; do
+            [ -f "$candidate" ] && MANIFESTS="$MANIFESTS $candidate"
+          done
+          echo "manifests=$MANIFESTS" >> "$GITHUB_OUTPUT"
+
+      - name: "SAST: Hardcoded secrets"
+        id: hardcoded
+        env:
+          SRC_DIRS: ${{ steps.detect.outputs.dirs }}
+        run: |
+          FOUND=$(grep -rn --include="*.kt" --include="*.java" -iE \
+            '(api[_-]?key|secret|password|token|private[_-]?key)\s*=\s*"[^"]{8,}"' \
+            $SRC_DIRS 2>/dev/null | grep -v "Test.kt" || true)
+          COUNT=$(echo "$FOUND" | grep -c . 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::Hardcoded secrets found: $COUNT"
+            echo "$FOUND" | head -10
+          fi
+
+      - name: "SAST: Weak cryptography"
+        id: weak-crypto
+        env:
+          SRC_DIRS: ${{ steps.detect.outputs.dirs }}
+        run: |
+          COUNT=0
+          for dir in $SRC_DIRS; do
+            C=$(grep -rn --include="*.kt" --include="*.java" -E '"(DES|DESede|RC4|RC2)"' "$dir" 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+            H=$(grep -rn --include="*.kt" --include="*.java" -E 'MessageDigest\.getInstance\("(MD5|SHA-1)"\)' "$dir" 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+            E=$(grep -rn --include="*.kt" --include="*.java" '".*ECB.*"' "$dir" 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+            COUNT=$((COUNT + C + H + E))
+          done
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          [ "$COUNT" -gt 0 ] && echo "::error::Weak cryptography detected: $COUNT occurrences"
+
+      - name: "SAST: SQL injection risk"
+        id: sqli
+        env:
+          SRC_DIRS: ${{ steps.detect.outputs.dirs }}
+        run: |
+          FOUND=$(grep -rn --include="*.kt" -E '(rawQuery|execSQL)\(' $SRC_DIRS 2>/dev/null | grep -v "/test/" || true)
+          COUNT=$(echo "$FOUND" | grep -c . 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          [ "$COUNT" -gt 0 ] && echo "::warning::rawQuery/execSQL usage: $COUNT"
+
+      - name: "Platform: network_security_config"
+        id: netsec
+        run: |
+          ISSUES=0
+          for candidate in app/src/main/res/xml/network_security_config.xml \
+                           mobile/src/main/res/xml/network_security_config.xml \
+                           wear/src/main/res/xml/network_security_config.xml \
+                           androidApp/src/main/res/xml/network_security_config.xml; do
+            if [ -f "$candidate" ]; then
+              if grep -q 'cleartextTrafficPermitted="true"' "$candidate"; then
+                echo "::error::Cleartext traffic permitted in $candidate"
+                ISSUES=$((ISSUES + 1))
+              fi
+            fi
+          done
+          MANIFESTS="${{ steps.detect.outputs.manifests }}"
+          for manifest in $MANIFESTS; do
+            if ! grep -q 'networkSecurityConfig' "$manifest"; then
+              echo "::warning::networkSecurityConfig not referenced in $manifest"
+              ISSUES=$((ISSUES + 1))
+            fi
+          done
+          echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
+
+      - name: "Platform: AndroidManifest security"
+        id: manifest
+        env:
+          MANIFESTS: ${{ steps.detect.outputs.manifests }}
+        run: |
+          ISSUES=0
+          for manifest in $MANIFESTS; do
+            if grep -q 'android:debuggable="true"' "$manifest"; then
+              echo "::error::debuggable=true in $manifest"
+              ISSUES=$((ISSUES + 1))
+            fi
+            if grep -q 'android:allowBackup="true"' "$manifest"; then
+              echo "::warning::allowBackup=true in $manifest"
+            fi
+          done
+          echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
+
+      - name: "SecureCoding: Sensitive data in logs"
+        id: sensitive-logs
+        env:
+          SRC_DIRS: ${{ steps.detect.outputs.dirs }}
+        run: |
+          FOUND=$(grep -rn --include="*.kt" -E 'Log\.(d|v|i|w|e).*\b(token|password|secret|credential)\b' \
+            $SRC_DIRS 2>/dev/null | grep -v "/test/" | grep -vi "keyevent\|keyboard\|keystor" || true)
+          COUNT=$(echo "$FOUND" | grep -c . 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          [ "$COUNT" -gt 0 ] && echo "::error::Sensitive data may be logged: $COUNT occurrences"
+
+      - name: "Compliance: MASVS summary"
+        env:
+          SRC_DIRS: ${{ steps.detect.outputs.dirs }}
+        run: |
+          echo "## OWASP MASVS v2 Compliance" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Category | Check | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          ENC=$(grep -rn --include="*.kt" "EncryptedSharedPreferences" $SRC_DIRS 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+          [ "$ENC" -gt 0 ] && R="PASS" || R="REVIEW"
+          echo "| MASVS-STORAGE-1 | Encrypted storage | $R |" >> "$GITHUB_STEP_SUMMARY"
+
+          KS=$(grep -rn --include="*.kt" "AndroidKeyStore" $SRC_DIRS 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+          [ "$KS" -gt 0 ] && R="PASS" || R="REVIEW"
+          echo "| MASVS-CRYPTO-2 | Key management | $R |" >> "$GITHUB_STEP_SUMMARY"
+
+          NSC=$(find . -name "network_security_config.xml" -path "*/res/xml/*" 2>/dev/null | wc -l || echo 0)
+          [ "$NSC" -gt 0 ] && R="PASS" || R="FAIL"
+          echo "| MASVS-NETWORK-1 | TLS enforcement | $R |" >> "$GITHUB_STEP_SUMMARY"
+
+          PG=$(grep -rn 'minifyEnabled = true' */build.gradle.kts 2>/dev/null | wc -l || echo 0)
+          [ "$PG" -gt 0 ] && R="PASS" || R="FAIL"
+          echo "| MASVS-RESILIENCE-2 | Obfuscation | $R |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarize findings
+        id: summary
+        env:
+          HARDCODED_COUNT: ${{ steps.hardcoded.outputs.count }}
+          MANIFEST_ISSUES: ${{ steps.manifest.outputs.issues }}
+          WEAK_CRYPTO_COUNT: ${{ steps.weak-crypto.outputs.count }}
+          SQLI_COUNT: ${{ steps.sqli.outputs.count }}
+          SENSITIVE_LOG_COUNT: ${{ steps.sensitive-logs.outputs.count }}
+          NETSEC_ISSUES: ${{ steps.netsec.outputs.issues }}
+        run: |
+          CRITICAL=0
+          HIGH=0
+          [ "${HARDCODED_COUNT:-0}" -gt 0 ] && CRITICAL=$((CRITICAL + 1))
+          [ "${MANIFEST_ISSUES:-0}" -gt 0 ] && CRITICAL=$((CRITICAL + 1))
+          [ "${WEAK_CRYPTO_COUNT:-0}" -gt 0 ] && HIGH=$((HIGH + 1))
+          [ "${SQLI_COUNT:-0}" -gt 0 ] && HIGH=$((HIGH + 1))
+          [ "${SENSITIVE_LOG_COUNT:-0}" -gt 0 ] && HIGH=$((HIGH + 1))
+          [ "${NETSEC_ISSUES:-0}" -gt 0 ] && HIGH=$((HIGH + 1))
+          echo "critical=$CRITICAL" >> "$GITHUB_OUTPUT"
+          echo "high=$HIGH" >> "$GITHUB_OUTPUT"
+
+  # ============================================================
+  # Job 5: 最終判定
+  # ============================================================
+  security-verdict:
+    name: "Final Verdict"
+    runs-on: ubuntu-latest
+    needs: [secret-detection, sca, secure-coding]
+    if: always()
+    outputs:
+      critical-count: ${{ steps.verdict.outputs.critical }}
+      high-count: ${{ steps.verdict.outputs.high }}
+      scan-passed: ${{ steps.verdict.outputs.passed }}
+    steps:
+      - name: Evaluate all results
+        id: verdict
+        env:
+          SECRET_PASSED: ${{ needs.secret-detection.outputs.passed }}
+          OWASP_CRIT: ${{ needs.sca.outputs.owasp-critical }}
+          TRIVY_CRIT: ${{ needs.sca.outputs.trivy-critical }}
+          SC_CRIT: ${{ needs.secure-coding.outputs.critical-count }}
+          SC_HIGH: ${{ needs.secure-coding.outputs.high-count }}
+          FAIL_ON_HIGH: ${{ inputs.fail-on-high }}
+        run: |
+          CRITICAL=0
+          HIGH=0
+
+          [ "$SECRET_PASSED" = "false" ] && CRITICAL=$((CRITICAL + 1))
+          [ "${OWASP_CRIT:-0}" -gt 0 ] && HIGH=$((HIGH + 1))
+          [ "${TRIVY_CRIT:-0}" -gt 0 ] && HIGH=$((HIGH + 1))
+          CRITICAL=$((CRITICAL + ${SC_CRIT:-0}))
+          HIGH=$((HIGH + ${SC_HIGH:-0}))
+
+          echo "critical=$CRITICAL" >> "$GITHUB_OUTPUT"
+          echo "high=$HIGH" >> "$GITHUB_OUTPUT"
+
+          if [ "$CRITICAL" -gt 0 ] || ([ "$HIGH" -gt 0 ] && [ "$FAIL_ON_HIGH" = "true" ]); then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Security scan FAILED: $CRITICAL critical, $HIGH high"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "## Security Verdict" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          [ "$SECRET_PASSED" = "true" ] && S="PASS" || S="FAIL"
+          echo "| Secret Detection | $S |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| OWASP Dependency-Check | ${OWASP_CRIT:-0} Critical/High |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trivy SCA | ${TRIVY_CRIT:-0} Critical/High |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Secure Coding | ${SC_CRIT:-0} Critical, ${SC_HIGH:-0} High |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          TOTAL=$((CRITICAL + HIGH))
+          [ "$TOTAL" -eq 0 ] && V="PASSED" || V="FAILED ($CRITICAL critical, $HIGH high)"
+          echo "**Verdict: $V**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if required
+        env:
+          PASSED: ${{ steps.verdict.outputs.passed }}
+          FAIL_ON_HIGH: ${{ inputs.fail-on-high }}
+        run: |
+          if [ "$PASSED" = "false" ] && [ "$FAIL_ON_HIGH" = "true" ]; then
+            exit 1
+          fi

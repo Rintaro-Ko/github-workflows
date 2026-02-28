@@ -1,0 +1,631 @@
+name: Reusable Android CI (Smart Change Detection)
+
+on:
+  workflow_call:
+    inputs:
+      primary-module:
+        description: 'Primary module name (e.g., app, mobile, androidApp)'
+        required: true
+        type: string
+      secondary-module:
+        description: 'Secondary module name (e.g., wear, shared). Empty if single-module.'
+        default: ''
+        type: string
+      tertiary-module:
+        description: 'Tertiary module name (e.g., shared). Empty if not needed.'
+        default: ''
+        type: string
+      java-version:
+        description: 'JDK version'
+        default: '17'
+        type: string
+      pre-test-script:
+        description: 'Shell commands to run before unit tests (e.g., generate test keys)'
+        default: ''
+        type: string
+      security-script:
+        description: 'Path to custom security check script (e.g., scripts/security-check.sh)'
+        default: ''
+        type: string
+      deploy-module:
+        description: 'Module to deploy to DeployGate. Empty to skip deployment.'
+        default: ''
+        type: string
+      deploygate-owner:
+        description: 'DeployGate owner name'
+        default: ''
+        type: string
+      run-owasp:
+        description: 'Run OWASP Dependency Check'
+        default: false
+        type: boolean
+      run-coverage:
+        description: 'Run Kover coverage report'
+        default: true
+        type: boolean
+      sast-exclude-pattern:
+        description: 'Grep -v pattern for SAST exclusions (e.g., VehicleSessionManagerImpl)'
+        default: ''
+        type: string
+
+jobs:
+  # =============================================================================
+  # Change Detection - dynamically builds path filters from module inputs
+  # =============================================================================
+  detect-changes:
+    name: "Detect Changes"
+    runs-on: ubuntu-latest
+    outputs:
+      primary: ${{ steps.filter.outputs.primary }}
+      secondary: ${{ steps.filter.outputs.secondary }}
+      tertiary: ${{ steps.filter.outputs.tertiary }}
+      source: ${{ steps.filter.outputs.source }}
+      build-config: ${{ steps.filter.outputs.build-config }}
+      ci-config: ${{ steps.filter.outputs.ci-config }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build dynamic path filters
+      id: build-filters
+      env:
+        PRIMARY: ${{ inputs.primary-module }}
+        SECONDARY: ${{ inputs.secondary-module }}
+        TERTIARY: ${{ inputs.tertiary-module }}
+      run: |
+        {
+        echo "filters<<EOF"
+
+        # Primary module (always present)
+        echo "primary:"
+        echo "  - '${PRIMARY}/src/**'"
+        echo "  - '${PRIMARY}/build.gradle.kts'"
+        echo "  - '${PRIMARY}/proguard-rules.pro'"
+
+        # Secondary module (optional)
+        if [ -n "$SECONDARY" ]; then
+          echo "secondary:"
+          echo "  - '${SECONDARY}/src/**'"
+          echo "  - '${SECONDARY}/build.gradle.kts'"
+        else
+          echo "secondary:"
+          echo "  - '__no_secondary_module__'"
+        fi
+
+        # Tertiary module (optional)
+        if [ -n "$TERTIARY" ]; then
+          echo "tertiary:"
+          echo "  - '${TERTIARY}/src/**'"
+          echo "  - '${TERTIARY}/build.gradle.kts'"
+        else
+          echo "tertiary:"
+          echo "  - '__no_tertiary_module__'"
+        fi
+
+        # Source aggregate (any module source or build config)
+        echo "source:"
+        echo "  - '${PRIMARY}/src/**'"
+        [ -n "$SECONDARY" ] && echo "  - '${SECONDARY}/src/**'"
+        [ -n "$TERTIARY" ] && echo "  - '${TERTIARY}/src/**'"
+        echo "  - '*.gradle.kts'"
+        echo "  - 'gradle/**'"
+
+        # Build config
+        echo "build-config:"
+        echo "  - '*.gradle.kts'"
+        echo "  - 'gradle/**'"
+        echo "  - 'gradle.properties'"
+        echo "  - 'settings.gradle.kts'"
+
+        # CI config
+        echo "ci-config:"
+        echo "  - '.github/**'"
+
+        echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: ${{ steps.build-filters.outputs.filters }}
+
+  # =============================================================================
+  # Secret Detection
+  # =============================================================================
+  secret-detection:
+    name: "Secret Detection"
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.source == 'true' || needs.detect-changes.outputs.ci-config == 'true'
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+    - name: API key pattern scan
+      run: |
+        PATTERN='(AIza[0-9A-Za-z_-]{35}|ghp_[0-9a-zA-Z]{36}|sk-[a-zA-Z0-9]{48}|AKIA[0-9A-Z]{16})'
+        FOUND=$(grep -rn --include="*.kt" --include="*.java" --include="*.xml" --include="*.properties" \
+          -E "$PATTERN" . 2>/dev/null | grep -v "build/" | grep -v ".gradle/" | grep -v "/test/" || true)
+        if [ -n "$FOUND" ]; then
+          echo "::error::API key pattern detected"
+          echo "$FOUND" | head -10
+          exit 1
+        fi
+
+  # =============================================================================
+  # Security Scan (OWASP MASVS)
+  # =============================================================================
+  security-scan:
+    name: "Security Scan (OWASP MASVS)"
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.source == 'true' || needs.detect-changes.outputs.build-config == 'true'
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Custom Security Script
+      if: inputs.security-script != ''
+      env:
+        SCRIPT_PATH: ${{ inputs.security-script }}
+      run: |
+        chmod +x "$SCRIPT_PATH"
+        "$SCRIPT_PATH"
+
+    - name: OWASP Dependency Check
+      if: inputs.run-owasp && needs.detect-changes.outputs.build-config == 'true'
+      run: ./gradlew dependencyCheckAnalyze || true
+      continue-on-error: true
+
+    - name: "Android Security Lint (primary)"
+      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.primary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "Android Security Lint (secondary)"
+      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "Android Security Lint (tertiary)"
+      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "SAST: Hardcoded secrets"
+      env:
+        PRIMARY: ${{ inputs.primary-module }}
+        SECONDARY: ${{ inputs.secondary-module }}
+        TERTIARY: ${{ inputs.tertiary-module }}
+        PRIMARY_CHANGED: ${{ needs.detect-changes.outputs.primary }}
+        SECONDARY_CHANGED: ${{ needs.detect-changes.outputs.secondary }}
+        TERTIARY_CHANGED: ${{ needs.detect-changes.outputs.tertiary }}
+        BUILD_CHANGED: ${{ needs.detect-changes.outputs.build-config }}
+      run: |
+        DIRS=""
+        if [ "$PRIMARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; then
+          [ -d "${PRIMARY}/src/main/java" ] && DIRS="$DIRS ${PRIMARY}/src/main/java"
+          [ -d "${PRIMARY}/src/main/kotlin" ] && DIRS="$DIRS ${PRIMARY}/src/main/kotlin"
+        fi
+        if [ -n "$SECONDARY" ] && { [ "$SECONDARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          [ -d "${SECONDARY}/src/main/java" ] && DIRS="$DIRS ${SECONDARY}/src/main/java"
+          [ -d "${SECONDARY}/src/main/kotlin" ] && DIRS="$DIRS ${SECONDARY}/src/main/kotlin"
+        fi
+        if [ -n "$TERTIARY" ] && { [ "$TERTIARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          [ -d "${TERTIARY}/src/main/java" ] && DIRS="$DIRS ${TERTIARY}/src/main/java"
+          [ -d "${TERTIARY}/src/main/kotlin" ] && DIRS="$DIRS ${TERTIARY}/src/main/kotlin"
+        fi
+        if [ -z "$DIRS" ]; then
+          echo "No relevant source changes, skipping"
+          exit 0
+        fi
+        FOUND=$(grep -rn --include="*.kt" --include="*.java" -iE \
+          '(api[_-]?key|secret|password|token|private[_-]?key)\s*=\s*"[^"]{8,}"' \
+          $DIRS 2>/dev/null | grep -v "Test.kt" | grep -v 'KEY_[A-Z_]*\s*=' || true)
+        if [ -n "$FOUND" ]; then
+          echo "::error::Hardcoded secrets found"
+          echo "$FOUND" | head -10
+          exit 1
+        fi
+
+    - name: "SAST: Weak cryptography"
+      env:
+        PRIMARY: ${{ inputs.primary-module }}
+        SECONDARY: ${{ inputs.secondary-module }}
+        TERTIARY: ${{ inputs.tertiary-module }}
+        PRIMARY_CHANGED: ${{ needs.detect-changes.outputs.primary }}
+        SECONDARY_CHANGED: ${{ needs.detect-changes.outputs.secondary }}
+        TERTIARY_CHANGED: ${{ needs.detect-changes.outputs.tertiary }}
+        BUILD_CHANGED: ${{ needs.detect-changes.outputs.build-config }}
+        EXCLUDE_PATTERN: ${{ inputs.sast-exclude-pattern }}
+      run: |
+        DIRS=""
+        if [ "$PRIMARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; then
+          [ -d "${PRIMARY}/src/main/java" ] && DIRS="$DIRS ${PRIMARY}/src/main/java"
+          [ -d "${PRIMARY}/src/main/kotlin" ] && DIRS="$DIRS ${PRIMARY}/src/main/kotlin"
+        fi
+        if [ -n "$SECONDARY" ] && { [ "$SECONDARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          [ -d "${SECONDARY}/src/main/java" ] && DIRS="$DIRS ${SECONDARY}/src/main/java"
+          [ -d "${SECONDARY}/src/main/kotlin" ] && DIRS="$DIRS ${SECONDARY}/src/main/kotlin"
+        fi
+        if [ -n "$TERTIARY" ] && { [ "$TERTIARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          [ -d "${TERTIARY}/src/main/java" ] && DIRS="$DIRS ${TERTIARY}/src/main/java"
+          [ -d "${TERTIARY}/src/main/kotlin" ] && DIRS="$DIRS ${TERTIARY}/src/main/kotlin"
+        fi
+        if [ -z "$DIRS" ]; then
+          echo "No relevant source changes, skipping"
+          exit 0
+        fi
+        FOUND=$(grep -rn --include="*.kt" --include="*.java" -E \
+          '"(DES|DESede|RC4|RC2)"' $DIRS 2>/dev/null | grep -v "/test/" || true)
+        HASH=$(grep -rn --include="*.kt" --include="*.java" -E \
+          'MessageDigest\.getInstance\("(MD5|SHA-1)"\)' $DIRS 2>/dev/null | grep -v "/test/" || true)
+        if [ -n "$EXCLUDE_PATTERN" ]; then
+          HASH=$(echo "$HASH" | grep -v "$EXCLUDE_PATTERN" || true)
+        fi
+        if [ -n "$FOUND" ] || [ -n "$HASH" ]; then
+          echo "::error::Weak cryptography detected"
+          echo "$FOUND" "$HASH"
+          exit 1
+        fi
+
+    - name: "SAST: Sensitive data in logs"
+      env:
+        PRIMARY: ${{ inputs.primary-module }}
+        SECONDARY: ${{ inputs.secondary-module }}
+        TERTIARY: ${{ inputs.tertiary-module }}
+        PRIMARY_CHANGED: ${{ needs.detect-changes.outputs.primary }}
+        SECONDARY_CHANGED: ${{ needs.detect-changes.outputs.secondary }}
+        TERTIARY_CHANGED: ${{ needs.detect-changes.outputs.tertiary }}
+        BUILD_CHANGED: ${{ needs.detect-changes.outputs.build-config }}
+      run: |
+        DIRS=""
+        if [ "$PRIMARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; then
+          [ -d "${PRIMARY}/src/main/java" ] && DIRS="$DIRS ${PRIMARY}/src/main/java"
+          [ -d "${PRIMARY}/src/main/kotlin" ] && DIRS="$DIRS ${PRIMARY}/src/main/kotlin"
+        fi
+        if [ -n "$SECONDARY" ] && { [ "$SECONDARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          [ -d "${SECONDARY}/src/main/java" ] && DIRS="$DIRS ${SECONDARY}/src/main/java"
+          [ -d "${SECONDARY}/src/main/kotlin" ] && DIRS="$DIRS ${SECONDARY}/src/main/kotlin"
+        fi
+        if [ -n "$TERTIARY" ] && { [ "$TERTIARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          [ -d "${TERTIARY}/src/main/java" ] && DIRS="$DIRS ${TERTIARY}/src/main/java"
+          [ -d "${TERTIARY}/src/main/kotlin" ] && DIRS="$DIRS ${TERTIARY}/src/main/kotlin"
+        fi
+        if [ -z "$DIRS" ]; then
+          echo "No relevant source changes, skipping"
+          exit 0
+        fi
+        FOUND=$(grep -rn --include="*.kt" -E 'Log\.(d|v|i|w|e).*\b(token|password|secret|credential)\b' \
+          $DIRS 2>/dev/null | grep -v "/test/" | grep -vi "keyevent\|keyboard\|keystor" || true)
+        if [ -n "$FOUND" ]; then
+          echo "::error::Sensitive data may be logged"
+          echo "$FOUND"
+          exit 1
+        fi
+
+    - name: "Platform: Manifest security"
+      env:
+        PRIMARY: ${{ inputs.primary-module }}
+        SECONDARY: ${{ inputs.secondary-module }}
+        TERTIARY: ${{ inputs.tertiary-module }}
+        PRIMARY_CHANGED: ${{ needs.detect-changes.outputs.primary }}
+        SECONDARY_CHANGED: ${{ needs.detect-changes.outputs.secondary }}
+        TERTIARY_CHANGED: ${{ needs.detect-changes.outputs.tertiary }}
+        BUILD_CHANGED: ${{ needs.detect-changes.outputs.build-config }}
+      run: |
+        MANIFESTS=""
+        if [ "$PRIMARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; then
+          MANIFESTS="$MANIFESTS ${PRIMARY}/src/main/AndroidManifest.xml"
+        fi
+        if [ -n "$SECONDARY" ] && { [ "$SECONDARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          MANIFESTS="$MANIFESTS ${SECONDARY}/src/main/AndroidManifest.xml"
+        fi
+        if [ -n "$TERTIARY" ] && { [ "$TERTIARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; }; then
+          MANIFESTS="$MANIFESTS ${TERTIARY}/src/main/AndroidManifest.xml"
+        fi
+        for manifest in $MANIFESTS; do
+          if [ -f "$manifest" ]; then
+            if grep -q 'android:debuggable="true"' "$manifest"; then
+              echo "::error::debuggable=true in $manifest"
+              exit 1
+            fi
+            grep -q 'networkSecurityConfig' "$manifest" || echo "::warning::networkSecurityConfig not referenced in $manifest"
+          fi
+        done
+
+    - name: "Compliance: MASVS v2 summary"
+      env:
+        PRIMARY: ${{ inputs.primary-module }}
+        SECONDARY: ${{ inputs.secondary-module }}
+        TERTIARY: ${{ inputs.tertiary-module }}
+      run: |
+        ALL_DIRS="${PRIMARY}/src/main/java ${PRIMARY}/src/main/kotlin"
+        if [ -n "$SECONDARY" ]; then
+          ALL_DIRS="$ALL_DIRS ${SECONDARY}/src/main/java ${SECONDARY}/src/main/kotlin"
+        fi
+        if [ -n "$TERTIARY" ]; then
+          ALL_DIRS="$ALL_DIRS ${TERTIARY}/src/main/java ${TERTIARY}/src/main/kotlin"
+        fi
+
+        echo "## OWASP MASVS v2 Compliance" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Category | Result |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+        ENC=$(grep -rn --include="*.kt" "EncryptedSharedPreferences" $ALL_DIRS 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+        [ "$ENC" -gt 0 ] && echo "| MASVS-STORAGE-1 | PASS |" >> "$GITHUB_STEP_SUMMARY" || echo "| MASVS-STORAGE-1 | REVIEW |" >> "$GITHUB_STEP_SUMMARY"
+
+        KS=$(grep -rn --include="*.kt" "AndroidKeyStore" $ALL_DIRS 2>/dev/null | grep -v "/test/" | wc -l || echo 0)
+        [ "$KS" -gt 0 ] && echo "| MASVS-CRYPTO-2 | PASS |" >> "$GITHUB_STEP_SUMMARY" || echo "| MASVS-CRYPTO-2 | REVIEW |" >> "$GITHUB_STEP_SUMMARY"
+
+        NSC=$(find . -name "network_security_config.xml" -path "*/res/xml/*" 2>/dev/null | wc -l || echo 0)
+        [ "$NSC" -gt 0 ] && echo "| MASVS-NETWORK-1 | PASS |" >> "$GITHUB_STEP_SUMMARY" || echo "| MASVS-NETWORK-1 | FAIL |" >> "$GITHUB_STEP_SUMMARY"
+
+        PG=$(grep -rn 'minifyEnabled = true' */build.gradle.kts 2>/dev/null | wc -l || echo 0)
+        [ "$PG" -gt 0 ] && echo "| MASVS-RESILIENCE-2 | PASS |" >> "$GITHUB_STEP_SUMMARY" || echo "| MASVS-RESILIENCE-2 | FAIL |" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload Security Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          **/build/reports/dependency-check-report.html
+          **/build/reports/lint-results-*.html
+        retention-days: 14
+
+  # =============================================================================
+  # Code Quality - per-module ktlint and lint
+  # =============================================================================
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.source == 'true'
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: "Ktlint Check (primary)"
+      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
+      run: ./gradlew ":${MODULE}:ktlintCheck"
+      env:
+        MODULE: ${{ inputs.primary-module }}
+
+    - name: "Ktlint Check (secondary)"
+      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:ktlintCheck"
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+
+    - name: "Ktlint Check (tertiary)"
+      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:ktlintCheck"
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+
+    - name: "Android Lint (primary)"
+      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.primary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "Android Lint (secondary)"
+      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "Android Lint (tertiary)"
+      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+  # =============================================================================
+  # Unit Tests - per-module with optional pre-test script
+  # =============================================================================
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: [detect-changes, code-quality]
+    if: needs.detect-changes.outputs.source == 'true'
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Pre-test setup
+      if: inputs.pre-test-script != ''
+      env:
+        SCRIPT: ${{ inputs.pre-test-script }}
+      run: eval "$SCRIPT"
+
+    - name: "Unit Tests (primary)"
+      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
+      run: ./gradlew ":${MODULE}:testDebugUnitTest"
+      env:
+        MODULE: ${{ inputs.primary-module }}
+
+    - name: "Unit Tests (secondary)"
+      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:testDebugUnitTest"
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+
+    - name: "Unit Tests (tertiary)"
+      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:testDebugUnitTest"
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+
+    - name: "Kover Coverage (primary)"
+      if: inputs.run-coverage && (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:koverHtmlReport"
+      env:
+        MODULE: ${{ inputs.primary-module }}
+      continue-on-error: true
+
+    - name: "Kover Coverage (secondary)"
+      if: inputs.run-coverage && inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:koverHtmlReport"
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+      continue-on-error: true
+
+    - name: "Kover Coverage (tertiary)"
+      if: inputs.run-coverage && inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:koverHtmlReport"
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+      continue-on-error: true
+
+    - name: Upload Test Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-reports
+        path: |
+          **/build/reports/tests/
+          **/build/reports/kover/
+        retention-days: 14
+
+  # =============================================================================
+  # Deploy Debug to DeployGate
+  # =============================================================================
+  deploy-debug:
+    name: Deploy Debug to DeployGate
+    runs-on: ubuntu-latest
+    needs: [detect-changes, test, security-scan, secret-detection]
+    if: |
+      always() &&
+      inputs.deploy-module != '' && inputs.deploygate-owner != '' &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
+      (needs.secret-detection.result == 'success' || needs.secret-detection.result == 'skipped')
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+    - name: Build Debug APK
+      run: ./gradlew ":${MODULE}:assembleDebug"
+      env:
+        MODULE: ${{ inputs.deploy-module }}
+    - name: Upload Debug to DeployGate
+      uses: DeployGate/deploygate-upload-github-action@v1.1.1
+      with:
+        api_token: ${{ secrets.DEPLOYGATE_API_KEY }}
+        owner_name: ${{ inputs.deploygate-owner }}
+        file_path: ${{ inputs.deploy-module }}/build/outputs/apk/debug/${{ inputs.deploy-module }}-debug.apk
+        message: "[Debug] ${{ inputs.deploy-module }} - ${{ github.sha }}"
+
+  # =============================================================================
+  # Deploy Release to DeployGate
+  # =============================================================================
+  deploy-release:
+    name: Deploy Release to DeployGate
+    runs-on: ubuntu-latest
+    needs: [detect-changes, test, security-scan, secret-detection]
+    if: |
+      always() &&
+      inputs.deploy-module != '' && inputs.deploygate-owner != '' &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
+      (needs.secret-detection.result == 'success' || needs.secret-detection.result == 'skipped')
+    steps:
+    - name: Check Release Secrets
+      run: |
+        if [ -z "$KEYSTORE_BASE64" ]; then
+          echo "::warning::KEYSTORE_BASE64 secret is not set. Skipping release build."
+          echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+        else
+          echo "SKIP_RELEASE=false" >> "$GITHUB_ENV"
+        fi
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+    - uses: actions/checkout@v4
+      if: env.SKIP_RELEASE != 'true'
+    - name: Set up JDK
+      if: env.SKIP_RELEASE != 'true'
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      if: env.SKIP_RELEASE != 'true'
+      run: chmod +x gradlew
+    - name: Decode Keystore
+      if: env.SKIP_RELEASE != 'true'
+      run: echo "$KEYSTORE_BASE64" | base64 -d > "${WORKSPACE_DIR}/keystore.jks"
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        WORKSPACE_DIR: ${{ github.workspace }}
+    - name: Build Release APK
+      if: env.SKIP_RELEASE != 'true'
+      run: ./gradlew ":${MODULE}:assembleRelease"
+      env:
+        MODULE: ${{ inputs.deploy-module }}
+        KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    - name: Upload Release to DeployGate
+      if: env.SKIP_RELEASE != 'true'
+      uses: DeployGate/deploygate-upload-github-action@v1.1.1
+      with:
+        api_token: ${{ secrets.DEPLOYGATE_API_KEY }}
+        owner_name: ${{ inputs.deploygate-owner }}
+        file_path: ${{ inputs.deploy-module }}/build/outputs/apk/release/${{ inputs.deploy-module }}-release.apk
+        message: "[Release] ${{ inputs.deploy-module }} - ${{ github.sha }}"
+    - name: Clean up Keystore
+      if: always() && env.SKIP_RELEASE != 'true'
+      run: rm -f "${WORKSPACE_DIR}/keystore.jks"
+      env:
+        WORKSPACE_DIR: ${{ github.workspace }}

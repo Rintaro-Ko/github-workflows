@@ -28,11 +28,19 @@ on:
         default: ''
         type: string
       deploy-module:
-        description: 'Module to deploy to DeployGate. Empty to skip deployment.'
+        description: 'Module to deploy via Firebase App Distribution. Empty to skip deployment.'
         default: ''
         type: string
-      deploygate-owner:
-        description: 'DeployGate owner name'
+      firebase-app-id:
+        description: 'Firebase App ID for distribution (e.g., 1:123456:android:abc123)'
+        default: ''
+        type: string
+      firebase-tester-groups:
+        description: 'Comma-separated Firebase tester group names (e.g., internal,qa)'
+        default: 'testers'
+        type: string
+      play-package-name:
+        description: 'Android package name for Play Console upload (e.g., com.example.app). Empty to skip.'
         default: ''
         type: string
       run-owasp:
@@ -525,17 +533,17 @@ jobs:
         retention-days: 14
 
   # =============================================================================
-  # Deploy Debug to DeployGate
+  # Deploy to Firebase App Distribution (on develop push)
   # =============================================================================
-  deploy-debug:
-    name: Deploy Debug to DeployGate
+  deploy-firebase:
+    name: Deploy to Firebase (develop)
     runs-on: ubuntu-latest
     needs: [detect-changes, test, security-scan, secret-detection]
     if: |
       always() &&
-      inputs.deploy-module != '' && inputs.deploygate-owner != '' &&
+      inputs.deploy-module != '' && inputs.firebase-app-id != '' &&
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      github.ref == 'refs/heads/develop' &&
       (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
@@ -554,24 +562,28 @@ jobs:
       run: ./gradlew ":${MODULE}:assembleDebug"
       env:
         MODULE: ${{ inputs.deploy-module }}
-    - name: Upload Debug to DeployGate
-      uses: DeployGate/deploygate-upload-github-action@v1.1.1
+    - name: Upload to Firebase App Distribution
+      uses: wzieba/Firebase-Distribution-Github-Action@v1
       with:
-        api_token: ${{ secrets.DEPLOYGATE_API_KEY }}
-        owner_name: ${{ inputs.deploygate-owner }}
-        file_path: ${{ inputs.deploy-module }}/build/outputs/apk/debug/${{ inputs.deploy-module }}-debug.apk
-        message: "[Debug] ${{ inputs.deploy-module }} - ${{ github.sha }}"
+        appId: ${{ inputs.firebase-app-id }}
+        serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        groups: ${{ inputs.firebase-tester-groups }}
+        file: ${{ inputs.deploy-module }}/build/outputs/apk/debug/${{ inputs.deploy-module }}-debug.apk
+        releaseNotes: |
+          Debug build from develop
+          Commit: ${{ github.sha }}
+          Author: ${{ github.actor }}
 
   # =============================================================================
-  # Deploy Release to DeployGate
+  # Deploy to Play Console Internal Testing (on main push)
   # =============================================================================
-  deploy-release:
-    name: Deploy Release to DeployGate
+  deploy-play-console:
+    name: Deploy to Play Console (main)
     runs-on: ubuntu-latest
     needs: [detect-changes, test, security-scan, secret-detection]
     if: |
       always() &&
-      inputs.deploy-module != '' && inputs.deploygate-owner != '' &&
+      inputs.deploy-module != '' && inputs.play-package-name != '' &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
       (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
@@ -607,23 +619,24 @@ jobs:
       env:
         KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         WORKSPACE_DIR: ${{ github.workspace }}
-    - name: Build Release APK
+    - name: Build Release AAB
       if: env.SKIP_RELEASE != 'true'
-      run: ./gradlew ":${MODULE}:assembleRelease"
+      run: ./gradlew ":${MODULE}:bundleRelease"
       env:
         MODULE: ${{ inputs.deploy-module }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-    - name: Upload Release to DeployGate
+    - name: Upload AAB to Play Console Internal Testing
       if: env.SKIP_RELEASE != 'true'
-      uses: DeployGate/deploygate-upload-github-action@v1.1.1
+      uses: r0adkll/upload-google-play@v1
       with:
-        api_token: ${{ secrets.DEPLOYGATE_API_KEY }}
-        owner_name: ${{ inputs.deploygate-owner }}
-        file_path: ${{ inputs.deploy-module }}/build/outputs/apk/release/${{ inputs.deploy-module }}-release.apk
-        message: "[Release] ${{ inputs.deploy-module }} - ${{ github.sha }}"
+        serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT }}
+        packageName: ${{ inputs.play-package-name }}
+        releaseFiles: ${{ inputs.deploy-module }}/build/outputs/bundle/release/${{ inputs.deploy-module }}-release.aab
+        track: internal
+        status: completed
     - name: Clean up Keystore
       if: always() && env.SKIP_RELEASE != 'true'
       run: rm -f "${WORKSPACE_DIR}/keystore.jks"

@@ -111,8 +111,15 @@ jobs:
         # Source aggregate (any module source or build config)
         echo "source:"
         echo "  - '${PRIMARY}/src/**'"
-        [ -n "$SECONDARY" ] && echo "  - '${SECONDARY}/src/**'"
-        [ -n "$TERTIARY" ] && echo "  - '${TERTIARY}/src/**'"
+        echo "  - '${PRIMARY}/build.gradle.kts'"
+        if [ -n "$SECONDARY" ]; then
+          echo "  - '${SECONDARY}/src/**'"
+          echo "  - '${SECONDARY}/build.gradle.kts'"
+        fi
+        if [ -n "$TERTIARY" ]; then
+          echo "  - '${TERTIARY}/src/**'"
+          echo "  - '${TERTIARY}/build.gradle.kts'"
+        fi
         echo "  - '*.gradle.kts'"
         echo "  - 'gradle/**'"
 

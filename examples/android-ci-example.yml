@@ -1,19 +1,22 @@
-# MyTeslaWearApp での使用例
-# このファイルを .github/workflows/ci.yml としてコピーしてください
+# 使用例: Smart CI Pipeline with Firebase + Play Console
+# このファイルを .github/workflows/android.yml としてコピーしてください
 
 name: Android CI
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "develop" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "develop" ]
 
 jobs:
   ci:
-    uses: <your-username>/github-workflows/.github/workflows/android-ci-full.yml@main
+    uses: Rintaro-Ko/github-workflows/.github/workflows/android-ci-smart.yml@main
     with:
-      java-version: '17'
-      deploy-module: 'mobile'        # MyTeslaWearAppの場合
-      deploygate-owner: 'Rintaro137'
+      primary-module: app             # メインモジュール名
+      # secondary-module: shared      # マルチモジュールの場合
+      deploy-module: app              # デプロイ対象モジュール
+      firebase-app-id: ${{ vars.FIREBASE_APP_ID }}
+      firebase-tester-groups: MyApptest_Users
+      play-package-name: com.example.app
     secrets: inherit

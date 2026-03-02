@@ -55,6 +55,14 @@ on:
         description: 'Grep -v pattern for SAST exclusions (e.g., VehicleSessionManagerImpl)'
         default: ''
         type: string
+      deploy-wear-module:
+        description: 'Wear OS module to deploy via Firebase App Distribution (e.g., wear). Empty to skip.'
+        default: ''
+        type: string
+      firebase-wear-app-id:
+        description: 'Firebase App ID for Wear OS distribution. Empty to skip.'
+        default: ''
+        type: string
 
 jobs:
   # =============================================================================
@@ -584,27 +592,63 @@ jobs:
         cache: gradle
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
-    - name: Build Debug APK
+    - name: Check Release Secrets
+      run: |
+        if [ -z "$KEYSTORE_BASE64" ]; then
+          echo "::warning::KEYSTORE_BASE64 secret is not set. Falling back to debug build."
+          echo "BUILD_TYPE=debug" >> "$GITHUB_ENV"
+        else
+          echo "BUILD_TYPE=release" >> "$GITHUB_ENV"
+        fi
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+    - name: Decode Keystore
+      if: env.BUILD_TYPE == 'release'
+      run: echo "$KEYSTORE_BASE64" | base64 -d > "${WORKSPACE_DIR}/keystore.jks"
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        WORKSPACE_DIR: ${{ github.workspace }}
+    - name: Build Release APK
+      if: env.BUILD_TYPE == 'release'
+      run: ./gradlew ":${MODULE}:assembleRelease"
+      env:
+        MODULE: ${{ inputs.deploy-module }}
+        KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    - name: Build Debug APK (fallback)
+      if: env.BUILD_TYPE == 'debug'
       run: ./gradlew ":${MODULE}:assembleDebug"
       env:
         MODULE: ${{ inputs.deploy-module }}
+    - name: Set APK path
+      run: |
+        if [ "$BUILD_TYPE" = "release" ]; then
+          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/release/${DEPLOY_MODULE}-release.apk" >> "$GITHUB_ENV"
+          echo "BUILD_LABEL=Release" >> "$GITHUB_ENV"
+        else
+          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" >> "$GITHUB_ENV"
+          echo "BUILD_LABEL=Debug" >> "$GITHUB_ENV"
+        fi
+      env:
+        DEPLOY_MODULE: ${{ inputs.deploy-module }}
     - name: Install Firebase CLI
       run: npm install -g firebase-tools
     - name: Upload to Firebase App Distribution
       env:
         FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         APP_ID: ${{ inputs.firebase-app-id }}
-        DEPLOY_MODULE: ${{ inputs.deploy-module }}
         COMMIT_SHA: ${{ github.sha }}
         ACTOR: ${{ github.actor }}
       run: |
         echo "$FIREBASE_SA" > /tmp/firebase-sa.json
         export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-sa.json
 
-        RELEASE_NOTES=$(printf "Debug build from develop\nCommit: %s\nAuthor: %s" "$COMMIT_SHA" "$ACTOR")
+        RELEASE_NOTES=$(printf "%s build from develop\nCommit: %s\nAuthor: %s" "$BUILD_LABEL" "$COMMIT_SHA" "$ACTOR")
 
         firebase appdistribution:distribute \
-          "${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" \
+          "$APK_PATH" \
           --app "$APP_ID" \
           --release-notes "$RELEASE_NOTES"
     - name: Distribute to tester groups
@@ -613,22 +657,133 @@ jobs:
       env:
         FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         APP_ID: ${{ inputs.firebase-app-id }}
-        DEPLOY_MODULE: ${{ inputs.deploy-module }}
         TESTER_GROUPS: ${{ inputs.firebase-tester-groups }}
       run: |
         export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-sa.json
 
         firebase appdistribution:distribute \
-          "${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" \
+          "$APK_PATH" \
           --app "$APP_ID" \
           --groups "$TESTER_GROUPS" || {
           echo "::warning::Failed to distribute to group '$TESTER_GROUPS'. Create this group in Firebase Console: App Distribution > Testers & Groups"
         }
-
-        rm -f /tmp/firebase-sa.json
     - name: Clean up credentials
       if: always()
-      run: rm -f /tmp/firebase-sa.json
+      run: |
+        rm -f /tmp/firebase-sa.json
+        rm -f "${{ github.workspace }}/keystore.jks"
+
+  # =============================================================================
+  # Deploy Wear OS to Firebase App Distribution (on develop push)
+  # =============================================================================
+  deploy-firebase-wear:
+    name: Deploy Wear OS to Firebase (develop)
+    runs-on: ubuntu-latest
+    needs: [detect-changes, test, security-scan, secret-detection]
+    if: |
+      always() &&
+      inputs.deploy-wear-module != '' && inputs.firebase-wear-app-id != '' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/develop' &&
+      (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
+      (needs.secret-detection.result == 'success' || needs.secret-detection.result == 'skipped')
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+    - name: Pre-test setup
+      if: inputs.pre-test-script != ''
+      env:
+        SCRIPT: ${{ inputs.pre-test-script }}
+      run: eval "$SCRIPT"
+    - name: Check Release Secrets
+      run: |
+        if [ -z "$KEYSTORE_BASE64" ]; then
+          echo "::warning::KEYSTORE_BASE64 secret is not set. Falling back to debug build."
+          echo "BUILD_TYPE=debug" >> "$GITHUB_ENV"
+        else
+          echo "BUILD_TYPE=release" >> "$GITHUB_ENV"
+        fi
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+    - name: Decode Keystore
+      if: env.BUILD_TYPE == 'release'
+      run: echo "$KEYSTORE_BASE64" | base64 -d > "${WORKSPACE_DIR}/keystore.jks"
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        WORKSPACE_DIR: ${{ github.workspace }}
+    - name: Build Wear Release APK
+      if: env.BUILD_TYPE == 'release'
+      run: ./gradlew ":${MODULE}:assembleRelease"
+      env:
+        MODULE: ${{ inputs.deploy-wear-module }}
+        KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    - name: Build Wear Debug APK (fallback)
+      if: env.BUILD_TYPE == 'debug'
+      run: ./gradlew ":${MODULE}:assembleDebug"
+      env:
+        MODULE: ${{ inputs.deploy-wear-module }}
+    - name: Set APK path
+      run: |
+        if [ "$BUILD_TYPE" = "release" ]; then
+          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/release/${DEPLOY_MODULE}-release.apk" >> "$GITHUB_ENV"
+          echo "BUILD_LABEL=Release" >> "$GITHUB_ENV"
+        else
+          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" >> "$GITHUB_ENV"
+          echo "BUILD_LABEL=Debug" >> "$GITHUB_ENV"
+        fi
+      env:
+        DEPLOY_MODULE: ${{ inputs.deploy-wear-module }}
+    - name: Install Firebase CLI
+      run: npm install -g firebase-tools
+    - name: Upload Wear APK to Firebase App Distribution
+      env:
+        FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        APP_ID: ${{ inputs.firebase-wear-app-id }}
+        COMMIT_SHA: ${{ github.sha }}
+        ACTOR: ${{ github.actor }}
+      run: |
+        echo "$FIREBASE_SA" > /tmp/firebase-sa.json
+        export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-sa.json
+
+        RELEASE_NOTES=$(printf "Wear OS %s build from develop\nCommit: %s\nAuthor: %s" "$BUILD_LABEL" "$COMMIT_SHA" "$ACTOR")
+
+        firebase appdistribution:distribute \
+          "$APK_PATH" \
+          --app "$APP_ID" \
+          --release-notes "$RELEASE_NOTES"
+    - name: Distribute to tester groups
+      if: inputs.firebase-tester-groups != ''
+      continue-on-error: true
+      env:
+        FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        APP_ID: ${{ inputs.firebase-wear-app-id }}
+        TESTER_GROUPS: ${{ inputs.firebase-tester-groups }}
+      run: |
+        export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-sa.json
+
+        firebase appdistribution:distribute \
+          "$APK_PATH" \
+          --app "$APP_ID" \
+          --groups "$TESTER_GROUPS" || {
+          echo "::warning::Failed to distribute Wear APK to group '$TESTER_GROUPS'."
+        }
+    - name: Clean up credentials
+      if: always()
+      run: |
+        rm -f /tmp/firebase-sa.json
+        rm -f "${{ github.workspace }}/keystore.jks"
 
   # =============================================================================
   # Deploy to Play Console Internal Testing (on main push)

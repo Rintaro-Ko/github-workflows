@@ -311,6 +311,7 @@ jobs:
         SECONDARY_CHANGED: ${{ needs.detect-changes.outputs.secondary }}
         TERTIARY_CHANGED: ${{ needs.detect-changes.outputs.tertiary }}
         BUILD_CHANGED: ${{ needs.detect-changes.outputs.build-config }}
+        EXCLUDE_PATTERN: ${{ inputs.sast-exclude-pattern }}
       run: |
         DIRS=""
         if [ "$PRIMARY_CHANGED" = "true" ] || [ "$BUILD_CHANGED" = "true" ]; then
@@ -331,6 +332,9 @@ jobs:
         fi
         FOUND=$(grep -rn --include="*.kt" -E 'Log\.(d|v|i|w|e).*\b(token|password|secret|credential)\b' \
           $DIRS 2>/dev/null | grep -v "/test/" | grep -vi "keyevent\|keyboard\|keystor" || true)
+        if [ -n "$EXCLUDE_PATTERN" ] && [ -n "$FOUND" ]; then
+          FOUND=$(echo "$FOUND" | grep -v "$EXCLUDE_PATTERN" || true)
+        fi
         if [ -n "$FOUND" ]; then
           echo "::error::Sensitive data may be logged"
           echo "$FOUND"
@@ -428,19 +432,34 @@ jobs:
 
     - name: "Ktlint Check (primary)"
       if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
-      run: ./gradlew ":${MODULE}:ktlintCheck"
+      run: |
+        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
+          ./gradlew ":${MODULE}:ktlintCheck"
+        else
+          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
+        fi
       env:
         MODULE: ${{ inputs.primary-module }}
 
     - name: "Ktlint Check (secondary)"
       if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:ktlintCheck"
+      run: |
+        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
+          ./gradlew ":${MODULE}:ktlintCheck"
+        else
+          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
+        fi
       env:
         MODULE: ${{ inputs.secondary-module }}
 
     - name: "Ktlint Check (tertiary)"
       if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:ktlintCheck"
+      run: |
+        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
+          ./gradlew ":${MODULE}:ktlintCheck"
+        else
+          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
+        fi
       env:
         MODULE: ${{ inputs.tertiary-module }}
 

@@ -595,25 +595,35 @@ jobs:
         FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         APP_ID: ${{ inputs.firebase-app-id }}
         DEPLOY_MODULE: ${{ inputs.deploy-module }}
-        TESTER_GROUPS: ${{ inputs.firebase-tester-groups }}
         COMMIT_SHA: ${{ github.sha }}
         ACTOR: ${{ github.actor }}
       run: |
         echo "$FIREBASE_SA" > /tmp/firebase-sa.json
         export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-sa.json
 
-        GROUPS_ARG=""
-        if [ -n "$TESTER_GROUPS" ]; then
-          GROUPS_ARG="--groups $TESTER_GROUPS"
-        fi
-
         RELEASE_NOTES=$(printf "Debug build from develop\nCommit: %s\nAuthor: %s" "$COMMIT_SHA" "$ACTOR")
 
         firebase appdistribution:distribute \
           "${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" \
           --app "$APP_ID" \
-          --release-notes "$RELEASE_NOTES" \
-          $GROUPS_ARG
+          --release-notes "$RELEASE_NOTES"
+    - name: Distribute to tester groups
+      if: inputs.firebase-tester-groups != ''
+      continue-on-error: true
+      env:
+        FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        APP_ID: ${{ inputs.firebase-app-id }}
+        DEPLOY_MODULE: ${{ inputs.deploy-module }}
+        TESTER_GROUPS: ${{ inputs.firebase-tester-groups }}
+      run: |
+        export GOOGLE_APPLICATION_CREDENTIALS=/tmp/firebase-sa.json
+
+        firebase appdistribution:distribute \
+          "${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" \
+          --app "$APP_ID" \
+          --groups "$TESTER_GROUPS" || {
+          echo "::warning::Failed to distribute to group '$TESTER_GROUPS'. Create this group in Firebase Console: App Distribution > Testers & Groups"
+        }
 
         rm -f /tmp/firebase-sa.json
     - name: Clean up credentials

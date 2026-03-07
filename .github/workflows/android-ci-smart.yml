@@ -312,7 +312,7 @@ jobs:
         HASH=$(grep -rn --include="*.kt" --include="*.java" -E \
           'MessageDigest\.getInstance\("(MD5|SHA-1)"\)' $DIRS 2>/dev/null | grep -v "/test/" || true)
         if [ -n "$EXCLUDE_PATTERN" ]; then
-          HASH=$(echo "$HASH" | grep -v "$EXCLUDE_PATTERN" || true)
+          HASH=$(echo "$HASH" | grep -vE "$EXCLUDE_PATTERN" || true)
         fi
         if [ -n "$FOUND" ] || [ -n "$HASH" ]; then
           echo "::error::Weak cryptography detected"
@@ -351,7 +351,7 @@ jobs:
         FOUND=$(grep -rn --include="*.kt" -E 'Log\.(d|v|i|w|e).*\b(token|password|secret|credential)\b' \
           $DIRS 2>/dev/null | grep -v "/test/" | grep -vi "keyevent\|keyboard\|keystor" || true)
         if [ -n "$EXCLUDE_PATTERN" ] && [ -n "$FOUND" ]; then
-          FOUND=$(echo "$FOUND" | grep -v "$EXCLUDE_PATTERN" || true)
+          FOUND=$(echo "$FOUND" | grep -vE "$EXCLUDE_PATTERN" || true)
         fi
         if [ -n "$FOUND" ]; then
           echo "::error::Sensitive data may be logged"

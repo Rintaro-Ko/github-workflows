@@ -627,7 +627,7 @@ jobs:
       run: ./gradlew ":${MODULE}:assemble${FLAVOR}Release"
       env:
         MODULE: ${{ inputs.deploy-module }}
-        FLAVOR: ${{ inputs.build-flavor }}
+        FLAVOR: ${{ inputs.release-flavor }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -637,7 +637,7 @@ jobs:
       run: ./gradlew ":${MODULE}:assemble${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.deploy-module }}
-        FLAVOR: ${{ inputs.build-flavor }}
+        FLAVOR: ${{ inputs.release-flavor }}
     - name: Set APK path
       run: |
         APK_FILE=$(find "${DEPLOY_MODULE}/build/outputs/apk" -name "*.apk" -not -name "*unsigned*" | head -1)
@@ -745,7 +745,7 @@ jobs:
       run: ./gradlew ":${MODULE}:assemble${FLAVOR}Release"
       env:
         MODULE: ${{ inputs.deploy-wear-module }}
-        FLAVOR: ${{ inputs.build-flavor }}
+        FLAVOR: ${{ inputs.release-flavor }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -755,7 +755,7 @@ jobs:
       run: ./gradlew ":${MODULE}:assemble${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.deploy-wear-module }}
-        FLAVOR: ${{ inputs.build-flavor }}
+        FLAVOR: ${{ inputs.release-flavor }}
     - name: Set APK path
       run: |
         APK_FILE=$(find "${DEPLOY_MODULE}/build/outputs/apk" -name "*.apk" -not -name "*unsigned*" | head -1)

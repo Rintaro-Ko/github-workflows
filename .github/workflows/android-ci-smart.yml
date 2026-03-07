@@ -63,6 +63,14 @@ on:
         description: 'Firebase App ID for Wear OS distribution. Empty to skip.'
         default: ''
         type: string
+      build-flavor:
+        description: 'Build flavor for CI and Firebase deploy (e.g., Dev). Empty for no flavors. Applied to primary/secondary modules only.'
+        default: ''
+        type: string
+      release-flavor:
+        description: 'Build flavor for Play Console deploy (e.g., Prod). Empty for no flavors.'
+        default: ''
+        type: string
 
 jobs:
   # =============================================================================
@@ -214,16 +222,18 @@ jobs:
 
     - name: "Android Security Lint (primary)"
       if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
-      run: ./gradlew ":${MODULE}:lintDebug"
+      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.primary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
 
     - name: "Android Security Lint (secondary)"
       if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:lintDebug"
+      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.secondary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
 
     - name: "Android Security Lint (tertiary)"
@@ -473,16 +483,18 @@ jobs:
 
     - name: "Android Lint (primary)"
       if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
-      run: ./gradlew ":${MODULE}:lintDebug"
+      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.primary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
 
     - name: "Android Lint (secondary)"
       if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:lintDebug"
+      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.secondary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
 
     - name: "Android Lint (tertiary)"
@@ -519,15 +531,17 @@ jobs:
 
     - name: "Unit Tests (primary)"
       if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
-      run: ./gradlew ":${MODULE}:testDebugUnitTest"
+      run: ./gradlew ":${MODULE}:test${FLAVOR}DebugUnitTest"
       env:
         MODULE: ${{ inputs.primary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
 
     - name: "Unit Tests (secondary)"
       if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:testDebugUnitTest"
+      run: ./gradlew ":${MODULE}:test${FLAVOR}DebugUnitTest"
       env:
         MODULE: ${{ inputs.secondary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
 
     - name: "Unit Tests (tertiary)"
       if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
@@ -610,25 +624,31 @@ jobs:
         WORKSPACE_DIR: ${{ github.workspace }}
     - name: Build Release APK
       if: env.BUILD_TYPE == 'release'
-      run: ./gradlew ":${MODULE}:assembleRelease"
+      run: ./gradlew ":${MODULE}:assemble${FLAVOR}Release"
       env:
         MODULE: ${{ inputs.deploy-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
     - name: Build Debug APK (fallback)
       if: env.BUILD_TYPE == 'debug'
-      run: ./gradlew ":${MODULE}:assembleDebug"
+      run: ./gradlew ":${MODULE}:assemble${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.deploy-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
     - name: Set APK path
       run: |
+        APK_FILE=$(find "${DEPLOY_MODULE}/build/outputs/apk" -name "*.apk" -not -name "*unsigned*" | head -1)
+        if [ -z "$APK_FILE" ]; then
+          echo "::error::No APK found in ${DEPLOY_MODULE}/build/outputs/apk"
+          exit 1
+        fi
+        echo "APK_PATH=${APK_FILE}" >> "$GITHUB_ENV"
         if [ "$BUILD_TYPE" = "release" ]; then
-          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/release/${DEPLOY_MODULE}-release.apk" >> "$GITHUB_ENV"
           echo "BUILD_LABEL=Release" >> "$GITHUB_ENV"
         else
-          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" >> "$GITHUB_ENV"
           echo "BUILD_LABEL=Debug" >> "$GITHUB_ENV"
         fi
       env:
@@ -722,25 +742,31 @@ jobs:
         WORKSPACE_DIR: ${{ github.workspace }}
     - name: Build Wear Release APK
       if: env.BUILD_TYPE == 'release'
-      run: ./gradlew ":${MODULE}:assembleRelease"
+      run: ./gradlew ":${MODULE}:assemble${FLAVOR}Release"
       env:
         MODULE: ${{ inputs.deploy-wear-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
     - name: Build Wear Debug APK (fallback)
       if: env.BUILD_TYPE == 'debug'
-      run: ./gradlew ":${MODULE}:assembleDebug"
+      run: ./gradlew ":${MODULE}:assemble${FLAVOR}Debug"
       env:
         MODULE: ${{ inputs.deploy-wear-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
     - name: Set APK path
       run: |
+        APK_FILE=$(find "${DEPLOY_MODULE}/build/outputs/apk" -name "*.apk" -not -name "*unsigned*" | head -1)
+        if [ -z "$APK_FILE" ]; then
+          echo "::error::No APK found in ${DEPLOY_MODULE}/build/outputs/apk"
+          exit 1
+        fi
+        echo "APK_PATH=${APK_FILE}" >> "$GITHUB_ENV"
         if [ "$BUILD_TYPE" = "release" ]; then
-          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/release/${DEPLOY_MODULE}-release.apk" >> "$GITHUB_ENV"
           echo "BUILD_LABEL=Release" >> "$GITHUB_ENV"
         else
-          echo "APK_PATH=${DEPLOY_MODULE}/build/outputs/apk/debug/${DEPLOY_MODULE}-debug.apk" >> "$GITHUB_ENV"
           echo "BUILD_LABEL=Debug" >> "$GITHUB_ENV"
         fi
       env:
@@ -832,20 +858,32 @@ jobs:
         WORKSPACE_DIR: ${{ github.workspace }}
     - name: Build Release AAB
       if: env.SKIP_RELEASE != 'true'
-      run: ./gradlew ":${MODULE}:bundleRelease"
+      run: ./gradlew ":${MODULE}:bundle${FLAVOR}Release"
       env:
         MODULE: ${{ inputs.deploy-module }}
+        FLAVOR: ${{ inputs.release-flavor }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    - name: Find AAB path
+      if: env.SKIP_RELEASE != 'true'
+      run: |
+        AAB_FILE=$(find "${DEPLOY_MODULE}/build/outputs/bundle" -name "*.aab" | head -1)
+        if [ -z "$AAB_FILE" ]; then
+          echo "::error::No AAB found in ${DEPLOY_MODULE}/build/outputs/bundle"
+          exit 1
+        fi
+        echo "AAB_PATH=${AAB_FILE}" >> "$GITHUB_ENV"
+      env:
+        DEPLOY_MODULE: ${{ inputs.deploy-module }}
     - name: Upload AAB to Play Console Internal Testing
       if: env.SKIP_RELEASE != 'true'
       uses: r0adkll/upload-google-play@v1
       with:
         serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT }}
         packageName: ${{ inputs.play-package-name }}
-        releaseFiles: ${{ inputs.deploy-module }}/build/outputs/bundle/release/${{ inputs.deploy-module }}-release.aab
+        releaseFiles: ${{ env.AAB_PATH }}
         track: internal
         status: completed
     - name: Clean up Keystore

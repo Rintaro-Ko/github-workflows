@@ -1,6 +1,24 @@
 # GitHub Workflows
 
-Android プロジェクト向けの再利用可能な GitHub Actions ワークフロー集です。
+Android プロジェクト向けの再利用可能な GitHub Actions ワークフロー集です。全プロジェクトの CI/CD 設定を本リポジトリで一元管理し、各プロジェクトは thin caller（15〜25行）で呼び出します。
+
+## エコシステムにおける位置づけ
+
+本リポジトリは 3 層開発・運用基盤の **CI/CD レイヤー** に位置します。
+
+| レイヤー | リポジトリ / ツール | 役割 |
+|---------|-------------------|------|
+| 開発 | ローカルスクリプト (`dev-cycle.sh`) | TDD自動サイクル（実装→テスト→Lint） |
+| **CI/CD** | **github-workflows**（本リポジトリ） | **Push/PR時のビルド・テスト・セキュリティ・デプロイ** |
+| 運用 | [claude-ops](https://github.com/Rintaro-Ko/claude-ops) | 24/7 監視・自動対応・コンテンツ生成 |
+
+### 利用プロジェクト
+
+| プロジェクト | モジュール構成 | デプロイ |
+|-------------|--------------|---------|
+| MyTeslaWearApp | mobile / wear / shared | Play Console: `com.example.myteslawearapp` |
+| RideVoiceNavi | androidApp / shared | Play Console: `com.example.ridevoicenavi` |
+| FuelEfficiency_AAOS | app | Play Console: `com.rintaro.truefuel` |
 
 ## 利用可能なワークフロー
 

@@ -75,6 +75,18 @@ on:
         description: 'Build flavor for Play Console deploy (e.g., Prod). Empty for no flavors.'
         default: ''
         type: string
+      run-llm-security:
+        description: 'Run LLM-powered multi-persona security review on push'
+        default: false
+        type: boolean
+      privacy-policy-repo:
+        description: 'GitHub repo hosting privacy policies (owner/repo)'
+        default: ''
+        type: string
+      privacy-policy-paths:
+        description: 'Space-separated paths to privacy policy HTML files'
+        default: ''
+        type: string
 
 jobs:
   # =============================================================================
@@ -920,3 +932,20 @@ jobs:
       run: rm -f "${WORKSPACE_DIR}/keystore.jks"
       env:
         WORKSPACE_DIR: ${{ github.workspace }}
+
+  # =============================================================================
+  # LLM Security Mini Scan (optional, on push)
+  # =============================================================================
+  llm-security-mini:
+    if: inputs.run-llm-security == true && needs.detect-changes.outputs.source == 'true'
+    needs: [detect-changes, security-scan]
+    uses: Rintaro-Ko/github-workflows/.github/workflows/android-security-llm.yml@main
+    with:
+      scan-mode: differential
+      primary-module: ${{ inputs.primary-module }}
+      secondary-module: ${{ inputs.secondary-module }}
+      tertiary-module: ${{ inputs.tertiary-module }}
+      privacy-policy-repo: ${{ inputs.privacy-policy-repo }}
+      privacy-policy-paths: ${{ inputs.privacy-policy-paths }}
+      fail-on-critical: true
+    secrets: inherit

@@ -1,0 +1,100 @@
+name: Android Security Cloud Audit
+
+on:
+  workflow_call:
+    inputs:
+      cloud-provider:
+        description: "Cloud provider: firebase, gcp, aws"
+        required: false
+        type: string
+        default: "firebase"
+      primary-module:
+        description: "Primary module name"
+        required: false
+        type: string
+        default: "app"
+
+    outputs:
+      audit-passed:
+        description: "Whether cloud audit passed"
+        value: ${{ jobs.cloud-audit.outputs.passed }}
+
+jobs:
+  cloud-audit:
+    name: Cloud Security Audit
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.verdict.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Firebase config audit
+        id: firebase
+        env:
+          PRIMARY_MODULE: ${{ inputs.primary-module }}
+        run: |
+          FINDINGS=""
+
+          # Check google-services.json exposure
+          GS_FILES=$(find . -name "google-services.json" -not -path "*/build/*" 2>/dev/null || true)
+          for GS in $GS_FILES; do
+            FINDINGS="$FINDINGS\n[INFO] Firebase config: $GS"
+          done
+
+          # Check for service account keys in repo
+          SA_FILES=$(find . \( -name "*service-account*.json" -o -name "*credentials*.json" \) \
+            -not -path "*/build/*" -not -path "*/.git/*" 2>/dev/null || true)
+          [ -n "$SA_FILES" ] && FINDINGS="$FINDINGS\n[CRITICAL] Service account keys in repo: $SA_FILES"
+
+          # Check Firebase security rules
+          for RULES in firestore.rules storage.rules database.rules.json; do
+            if [ -f "$RULES" ]; then
+              grep -q "allow read, write: if true" "$RULES" 2>/dev/null && \
+                FINDINGS="$FINDINGS\n[CRITICAL] Unrestricted access in $RULES"
+              grep -q "allow read, write" "$RULES" 2>/dev/null && ! grep -q "if" "$RULES" 2>/dev/null && \
+                FINDINGS="$FINDINGS\n[CRITICAL] Rules without conditions in $RULES"
+            fi
+          done
+
+          # Check .gitignore
+          if [ -f ".gitignore" ]; then
+            for PATTERN in "google-services.json" "service-account" "*.keystore" "*.jks" "local.properties"; do
+              grep -q "$PATTERN" .gitignore 2>/dev/null || \
+                FINDINGS="$FINDINGS\n[MEDIUM] .gitignore missing: $PATTERN"
+            done
+          fi
+
+          # Network security config
+          NSC="$PRIMARY_MODULE/src/main/res/xml/network_security_config.xml"
+          if [ -f "$NSC" ]; then
+            grep -q 'cleartextTrafficPermitted="true"' "$NSC" 2>/dev/null && \
+              FINDINGS="$FINDINGS\n[HIGH] Cleartext traffic permitted in $NSC"
+            grep -q "pin-set" "$NSC" 2>/dev/null || \
+              FINDINGS="$FINDINGS\n[MEDIUM] No certificate pinning in $NSC"
+          else
+            FINDINGS="$FINDINGS\n[MEDIUM] No network_security_config.xml for $PRIMARY_MODULE"
+          fi
+
+          mkdir -p /tmp/cloud-report
+          echo -e "# Cloud Security Audit\n$FINDINGS" > /tmp/cloud-report/report.md
+
+          echo "findings<<EOF" >> "$GITHUB_OUTPUT"
+          echo -e "$FINDINGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Determine pass/fail
+        id: verdict
+        env:
+          FINDINGS: ${{ steps.firebase.outputs.findings }}
+        run: |
+          if echo "$FINDINGS" | grep -q "\[CRITICAL\]"; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloud-audit-report
+          path: /tmp/cloud-report/
+          retention-days: 30

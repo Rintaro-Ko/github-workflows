@@ -1,0 +1,390 @@
+name: Android Security LLM Review
+
+on:
+  workflow_call:
+    inputs:
+      scan-mode:
+        description: "Scan mode: differential (push) or full (weekly)"
+        required: true
+        type: string
+        default: "differential"
+      primary-module:
+        description: "Primary module name"
+        required: false
+        type: string
+        default: "app"
+      secondary-module:
+        description: "Secondary module name"
+        required: false
+        type: string
+        default: ""
+      tertiary-module:
+        description: "Tertiary module name"
+        required: false
+        type: string
+        default: ""
+      privacy-policy-repo:
+        description: "GitHub repo hosting privacy policies (owner/repo)"
+        required: false
+        type: string
+        default: ""
+      privacy-policy-paths:
+        description: "Space-separated paths to policy HTML files"
+        required: false
+        type: string
+        default: ""
+      fail-on-critical:
+        description: "Fail workflow if CRITICAL findings exist"
+        required: false
+        type: boolean
+        default: true
+
+    outputs:
+      gate-decision:
+        description: "PASS, CONDITIONAL, or FAIL"
+        value: ${{ jobs.approval-gate.outputs.decision }}
+      findings-count:
+        description: "Total number of security findings"
+        value: ${{ jobs.approval-gate.outputs.findings-count }}
+
+jobs:
+  collect-context:
+    name: Collect Scan Context
+    runs-on: ubuntu-latest
+    outputs:
+      has-changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes and collect context
+        id: check
+        env:
+          SCAN_MODE: ${{ inputs.scan-mode }}
+          PRIMARY_MODULE: ${{ inputs.primary-module }}
+          SECONDARY_MODULE: ${{ inputs.secondary-module }}
+          TERTIARY_MODULE: ${{ inputs.tertiary-module }}
+          POLICY_REPO: ${{ inputs.privacy-policy-repo }}
+          POLICY_PATHS: ${{ inputs.privacy-policy-paths }}
+        run: |
+          mkdir -p /tmp/scan-context
+
+          MODULES="$PRIMARY_MODULE"
+          [ -n "$SECONDARY_MODULE" ] && MODULES="$MODULES $SECONDARY_MODULE"
+          [ -n "$TERTIARY_MODULE" ] && MODULES="$MODULES $TERTIARY_MODULE"
+
+          if [ "$SCAN_MODE" = "differential" ]; then
+            CHANGED=$(git diff --name-only HEAD~1 -- \
+              '*.kt' '*.java' '*.xml' '*.gradle.kts' '*.properties' 2>/dev/null || echo "")
+            if [ -z "$CHANGED" ]; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+            echo "$CHANGED" | while read -r file; do
+              if [ -f "$file" ]; then
+                echo "--- $file ---" >> /tmp/scan-context/source.txt
+                cat "$file" >> /tmp/scan-context/source.txt
+                echo "" >> /tmp/scan-context/source.txt
+              fi
+            done
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+            for MODULE in $MODULES; do
+              for TARGET in "$MODULE/src/main/AndroidManifest.xml" "$MODULE/build.gradle.kts"; do
+                if [ -f "$TARGET" ]; then
+                  echo "--- $TARGET ---" >> /tmp/scan-context/source.txt
+                  cat "$TARGET" >> /tmp/scan-context/source.txt
+                fi
+              done
+              for DIR in src/main/java src/main/kotlin; do
+                if [ -d "$MODULE/$DIR" ]; then
+                  find "$MODULE/$DIR" \( -name "*.kt" -o -name "*.java" \) | head -50 | while read -r f; do
+                    echo "--- $f ---" >> /tmp/scan-context/source.txt
+                    head -200 "$f" >> /tmp/scan-context/source.txt
+                  done
+                fi
+              done
+            done
+          fi
+
+          # Truncate
+          if [ -f /tmp/scan-context/source.txt ]; then
+            head -c 60000 /tmp/scan-context/source.txt > /tmp/scan-context/source_t.txt
+            mv /tmp/scan-context/source_t.txt /tmp/scan-context/source.txt
+          else
+            echo "(no source files)" > /tmp/scan-context/source.txt
+          fi
+
+      - name: Fetch privacy policies
+        if: inputs.privacy-policy-repo != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POLICY_REPO: ${{ inputs.privacy-policy-repo }}
+          POLICY_PATHS: ${{ inputs.privacy-policy-paths }}
+        run: |
+          for POLICY_PATH in $POLICY_PATHS; do
+            echo "--- $POLICY_PATH ---" >> /tmp/scan-context/policies.txt
+            gh api "/repos/$POLICY_REPO/contents/$POLICY_PATH" \
+              --jq '.content' 2>/dev/null | base64 -d >> /tmp/scan-context/policies.txt || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scan-context
+          path: /tmp/scan-context/
+          retention-days: 7
+
+  deterministic-scan:
+    name: Deterministic Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: SAST checks
+        id: sast
+        run: |
+          RESULTS=""
+          # Hardcoded secrets
+          HITS=$(grep -rn -E '(api[_-]?key|secret|password|token)\s*=\s*"[^"]{8,}"' \
+            --include="*.kt" --include="*.java" . | grep -v "/test/" | grep -v "/build/" || true)
+          [ -n "$HITS" ] && RESULTS="$RESULTS\n[SAST-SECRETS]\n$HITS"
+
+          # Weak crypto
+          HITS=$(grep -rn -E '(DES|DESede|RC4|RC2|MD5|SHA-1|/ECB/)' \
+            --include="*.kt" --include="*.java" . | grep -v "/test/" | grep -v "/build/" || true)
+          [ -n "$HITS" ] && RESULTS="$RESULTS\n[SAST-CRYPTO]\n$HITS"
+
+          # Sensitive logging
+          HITS=$(grep -rn -E 'Log\.(d|v|i|w|e)\(.*?(token|password|secret|key|credential)' \
+            --include="*.kt" --include="*.java" . | grep -v "/test/" | grep -v "/build/" || true)
+          [ -n "$HITS" ] && RESULTS="$RESULTS\n[SAST-LOGS]\n$HITS"
+
+          # SQL injection
+          HITS=$(grep -rn -E '(rawQuery|execSQL)\(' \
+            --include="*.kt" --include="*.java" . | grep -v "/test/" | grep -v "/build/" || true)
+          [ -n "$HITS" ] && RESULTS="$RESULTS\n[SAST-SQLI]\n$HITS"
+
+          # Manifest issues
+          for M in $(find . -name "AndroidManifest.xml" -path "*/main/*"); do
+            grep -q 'debuggable="true"' "$M" 2>/dev/null && RESULTS="$RESULTS\n[MANIFEST] $M: debuggable=true"
+            grep -q 'allowBackup="true"' "$M" 2>/dev/null && RESULTS="$RESULTS\n[MANIFEST] $M: allowBackup=true"
+          done
+
+          mkdir -p /tmp/deterministic
+          echo -e "$RESULTS" > /tmp/deterministic/findings.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deterministic-findings
+          path: /tmp/deterministic/
+          retention-days: 7
+
+  llm-persona-review:
+    name: LLM Multi-Persona Review
+    needs: [collect-context, deterministic-scan]
+    if: needs.collect-context.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      gate-decision: ${{ steps.review.outputs.gate_decision }}
+      findings-count: ${{ steps.review.outputs.findings_count }}
+      report: ${{ steps.review.outputs.report_path }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: scan-context
+          path: /tmp/scan-context/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: deterministic-findings
+          path: /tmp/deterministic/
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Execute 4-persona review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SCAN_MODE: ${{ inputs.scan-mode }}
+        run: |
+          SOURCE=$(cat /tmp/scan-context/source.txt 2>/dev/null | head -c 50000 || echo "(empty)")
+          DETERM=$(cat /tmp/deterministic/findings.txt 2>/dev/null || echo "(none)")
+          POLICIES=$(cat /tmp/scan-context/policies.txt 2>/dev/null || echo "")
+
+          COMMON_SUFFIX='Output ONLY valid JSON: {"verdict":"APPROVE|REJECT|CONDITIONAL","findings":[{"id":"F-001","category":"vulnerability_assessment|penetration_testing|cloud_security|threat_analysis|privacy_compliance","severity":"CRITICAL|HIGH|MEDIUM|LOW","cvss_score":0.0,"title":"...","description":"...","affected_files":[],"remediation":"...","masvs_mapping":"","confidence":"HIGH|MEDIUM|LOW"}],"summary":"..."}'
+
+          # Model selection based on scan mode
+          if [ "$SCAN_MODE" = "differential" ]; then
+            MODEL_MID="haiku"; MODEL_LEAD="sonnet"
+          else
+            MODEL_MID="sonnet"; MODEL_LEAD="opus"
+          fi
+
+          # Persona 1: Mid-Level Engineer
+          echo "Running mid-level engineer review..."
+          MID_RESULT=$(claude -p --model "$MODEL_MID" --output-format json \
+            "You are a mid-level Android security engineer (3-5yr) at FFRI Security. Review for OWASP Top 10 Mobile. Check hardcoded secrets, SQL injection, insecure storage, weak crypto, exported components, sensitive logging, WebView security. Deterministic findings: $DETERM --- Source: $SOURCE --- $COMMON_SUFFIX" \
+            2>/dev/null || echo '{"verdict":"REJECT","findings":[],"summary":"Review failed"}')
+
+          # Persona 2: Senior Engineer
+          echo "Running senior engineer review..."
+          SENIOR_RESULT=$(claude -p --model sonnet --output-format json \
+            "You are a senior security engineer (8-10yr) at NRI SecureTechnologies. Focus on architecture-level threats: data flow, auth architecture, crypto design, trust boundaries, IPC security, supply chain risk. Review prior mid-level findings for false positives. Prior findings: $MID_RESULT --- Source: $SOURCE --- $COMMON_SUFFIX Flag HIGH and CRITICAL only." \
+            2>/dev/null || echo '{"verdict":"REJECT","findings":[],"summary":"Review failed"}')
+
+          # Persona 3: Lead/Principal Engineer (Approver)
+          echo "Running lead engineer (approver) review..."
+          LEAD_RESULT=$(claude -p --model "$MODEL_LEAD" --output-format json \
+            "You are the Lead/Principal security engineer and FINAL APPROVER at FFRI Security. Review ALL prior findings, assess business risk, check systemic patterns. REJECT if unmitigated CRITICAL exists. CONDITIONAL if HIGH with remediation path. Your verdict is binding. Mid-level: $MID_RESULT --- Senior: $SENIOR_RESULT --- $COMMON_SUFFIX" \
+            2>/dev/null || echo '{"verdict":"REJECT","findings":[],"summary":"Review failed"}')
+
+          # Persona 4: EU Regulatory Authority
+          echo "Running EU regulatory authority review..."
+          if [ -n "$POLICIES" ]; then
+            EU_RESULT=$(claude -p --model sonnet --output-format json \
+              "You are an EU Data Protection Authority reviewer. Check GDPR, ePrivacy, NIS2, Japan APPI, US CCPA/COPPA compliance. Cross-reference code vs privacy policy. Policies: $POLICIES --- Source: $SOURCE --- $COMMON_SUFFIX Category: privacy_compliance." \
+              2>/dev/null || echo '{"verdict":"CONDITIONAL","findings":[],"summary":"Review incomplete"}')
+          else
+            EU_RESULT='{"verdict":"APPROVE","findings":[],"summary":"No privacy policy provided for review"}'
+          fi
+
+          # Aggregate gate decision
+          GATE="PASS"
+          for RESULT_VAR in "$MID_RESULT" "$SENIOR_RESULT" "$LEAD_RESULT" "$EU_RESULT"; do
+            V=$(echo "$RESULT_VAR" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('verdict','REJECT'))" 2>/dev/null || echo "REJECT")
+            [ "$V" = "REJECT" ] && GATE="FAIL" && break
+            [ "$V" = "CONDITIONAL" ] && GATE="CONDITIONAL"
+          done
+
+          # Count findings
+          TOTAL=0
+          for RESULT_VAR in "$MID_RESULT" "$SENIOR_RESULT" "$LEAD_RESULT" "$EU_RESULT"; do
+            C=$(echo "$RESULT_VAR" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('findings',[])))" 2>/dev/null || echo "0")
+            TOTAL=$((TOTAL + C))
+          done
+
+          echo "gate_decision=$GATE" >> "$GITHUB_OUTPUT"
+          echo "findings_count=$TOTAL" >> "$GITHUB_OUTPUT"
+
+          # Build report
+          MID_V=$(echo "$MID_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          SR_V=$(echo "$SENIOR_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          LD_V=$(echo "$LEAD_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          EU_V=$(echo "$EU_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+
+          cat > /tmp/security-report.md << EOF
+          # Security Scan Report
+
+          **Scan Mode**: $SCAN_MODE | **Gate**: $GATE | **Findings**: $TOTAL
+
+          | Persona | Verdict |
+          |---------|---------|
+          | Mid-Level Engineer (FFRI) | $MID_V |
+          | Senior Engineer (NRI Secure) | $SR_V |
+          | Lead Engineer - Approver | $LD_V |
+          | EU Regulatory Authority | $EU_V |
+
+          <details><summary>Mid-Level Engineer</summary>
+
+          \`\`\`json
+          $MID_RESULT
+          \`\`\`
+          </details>
+
+          <details><summary>Senior Engineer</summary>
+
+          \`\`\`json
+          $SENIOR_RESULT
+          \`\`\`
+          </details>
+
+          <details><summary>Lead Engineer (Approver)</summary>
+
+          \`\`\`json
+          $LEAD_RESULT
+          \`\`\`
+          </details>
+
+          <details><summary>EU Regulatory Authority</summary>
+
+          \`\`\`json
+          $EU_RESULT
+          \`\`\`
+          </details>
+          EOF
+
+          echo "report_path=/tmp/security-report.md" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-llm-report
+          path: /tmp/security-report.md
+          retention-days: 30
+
+  approval-gate:
+    name: Security Approval Gate
+    needs: [llm-persona-review]
+    if: always() && needs.llm-persona-review.result != 'skipped'
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ needs.llm-persona-review.outputs.gate-decision }}
+      findings-count: ${{ needs.llm-persona-review.outputs.findings-count }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: security-llm-report
+          path: /tmp/
+
+      - name: Post PR comment (differential)
+        if: inputs.scan-mode == 'differential' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/security-report.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report.substring(0, 65000)
+            });
+
+      - name: Create security issue (full scan)
+        if: inputs.scan-mode == 'full'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/security-report.md', 'utf8');
+            const decision = '${{ needs.llm-persona-review.outputs.gate-decision }}';
+            const count = '${{ needs.llm-persona-review.outputs.findings-count }}';
+            const date = new Date().toISOString().split('T')[0];
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Security] Full scan ${date} - ${decision} (${count} findings)`,
+              body: report.substring(0, 65000),
+              labels: ['security', 'automated-scan']
+            });
+
+      - name: Enforce gate
+        if: inputs.fail-on-critical
+        env:
+          DECISION: ${{ needs.llm-persona-review.outputs.gate-decision }}
+        run: |
+          if [ "$DECISION" = "FAIL" ]; then
+            echo "::error::Security gate FAILED. CRITICAL findings require remediation."
+            exit 1
+          fi
+          echo "Security gate: $DECISION"

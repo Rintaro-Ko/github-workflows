@@ -92,12 +92,51 @@ jobs:
 | `KEY_ALIAS` | Secret | リリース時 | キーエイリアス |
 | `KEY_PASSWORD` | Secret | リリース時 | キーパスワード |
 
+## セキュリティワークフロー
+
+### LLMマルチペルソナセキュリティレビュー (`android-security-llm.yml`)
+
+Claude Code を活用した4ペルソナ（中堅/上級/シニア承認者/EU当局）による多角的セキュリティレビュー。
+
+| モード | トリガー | 内容 |
+|--------|---------|------|
+| **differential** | Push毎（`android-ci-smart.yml` 経由） | 変更ファイルのみをHaikuで高速スキャン |
+| **full** | 週次 cron schedule | 全コードを4ペルソナ全員でフルレビュー |
+
+追加 inputs: `scan-mode`, `privacy-policy-repo`, `privacy-policy-paths`, `fail-on-critical`
+追加 secrets: `ANTHROPIC_API_KEY`
+
+### DAST + Maestro E2E (`android-security-dast.yml`)
+
+APKビルド → Maestro E2E セキュリティテスト（エミュレータ上） + APKバイナリ解析（逆コンパイル、権限監査、exported コンポーネント、証明書ピンニング検査）。
+
+### クラウドセキュリティ監査 (`android-security-cloud.yml`)
+
+Firebase設定監査: セキュリティルール（Firestore/Storage/RTDB）、IAM/サービスアカウント、network_security_config.xml、.gitignore漏れチェック。
+
+### スマートCIでのLLMセキュリティ統合
+
+`android-ci-smart.yml` に `run-llm-security: true` を指定すると、Push毎に差分ベースのLLMセキュリティレビューを自動実行:
+
+```yaml
+jobs:
+  ci:
+    uses: Rintaro-Ko/github-workflows/.github/workflows/android-ci-smart.yml@main
+    with:
+      primary-module: app
+      run-llm-security: true
+      privacy-policy-repo: Rintaro-Ko/taro-autodev-app
+      privacy-policy-paths: "docs/privacy-policy.html docs/terms-of-service.html"
+    secrets: inherit
+```
+
 ## セットアップ
 
 1. このリポジトリを自分のGitHubアカウントにプッシュ
 2. 各プロジェクトで `.github/workflows/android.yml` を作成（上記テンプレート参照）
 3. Firebase プロジェクト作成 + サービスアカウント設定
 4. GitHub リポジトリに Secrets/Variables を設定
+5. LLMセキュリティ使用時: `ANTHROPIC_API_KEY` を GitHub Secrets に追加
 
 ## リポジトリの可視性
 

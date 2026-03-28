@@ -643,12 +643,16 @@ jobs:
       env:
         MODULE: ${{ inputs.deploy-module }}
         FLAVOR: ${{ inputs.build-flavor }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
     - name: Build Release APK
       if: env.HAS_KEYSTORE == 'true'
       run: ./gradlew ":${MODULE}:assemble${FLAVOR}Release"
       env:
         MODULE: ${{ inputs.deploy-module }}
         FLAVOR: ${{ inputs.release-flavor }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -898,6 +902,8 @@ jobs:
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
     - name: Find AAB path
       if: env.SKIP_RELEASE != 'true'
       run: |

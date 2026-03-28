@@ -88,6 +88,10 @@ on:
         default: ''
         type: string
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # =============================================================================
   # Change Detection - dynamically builds path filters from module inputs
@@ -102,6 +106,8 @@ jobs:
       source: ${{ steps.filter.outputs.source }}
       build-config: ${{ steps.filter.outputs.build-config }}
       ci-config: ${{ steps.filter.outputs.ci-config }}
+      docs-only: ${{ steps.filter.outputs.docs-only }}
+      deps-changed: ${{ steps.filter.outputs.deps-changed }}
     steps:
     - uses: actions/checkout@v4
     - name: Build dynamic path filters
@@ -166,6 +172,19 @@ jobs:
         echo "ci-config:"
         echo "  - '.github/**'"
 
+        # Docs only (markdown, docs, and non-code files)
+        echo "docs-only:"
+        echo "  - '**.md'"
+        echo "  - 'docs/**'"
+        echo "  - 'LICENSE'"
+        echo "  - '.gitignore'"
+
+        # Dependency files
+        echo "deps-changed:"
+        echo "  - 'gradle/libs.versions.toml'"
+        echo "  - '**/build.gradle.kts'"
+        echo "  - 'gradle/wrapper/**'"
+
         echo "EOF"
         } >> "$GITHUB_OUTPUT"
 
@@ -175,13 +194,15 @@ jobs:
         filters: ${{ steps.build-filters.outputs.filters }}
 
   # =============================================================================
-  # Secret Detection
+  # Quality Gate - secret detection + code quality (merged for efficiency)
   # =============================================================================
-  secret-detection:
-    name: "Secret Detection"
+  quality-gate:
+    name: Quality Gate
     runs-on: ubuntu-latest
     needs: [detect-changes]
     if: needs.detect-changes.outputs.source == 'true' || needs.detect-changes.outputs.ci-config == 'true'
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.caching=true"
     steps:
     - uses: actions/checkout@v4
       with:
@@ -201,6 +222,70 @@ jobs:
           echo "$FOUND" | head -10
           exit 1
         fi
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: gradle
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: "Ktlint Check (primary)"
+      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
+      run: |
+        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
+          ./gradlew ":${MODULE}:ktlintCheck"
+        else
+          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
+        fi
+      env:
+        MODULE: ${{ inputs.primary-module }}
+
+    - name: "Ktlint Check (secondary)"
+      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: |
+        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
+          ./gradlew ":${MODULE}:ktlintCheck"
+        else
+          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
+        fi
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+
+    - name: "Ktlint Check (tertiary)"
+      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: |
+        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
+          ./gradlew ":${MODULE}:ktlintCheck"
+        else
+          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
+        fi
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+
+    - name: "Android Lint (primary)"
+      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
+      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
+      env:
+        MODULE: ${{ inputs.primary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "Android Lint (secondary)"
+      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
+      env:
+        MODULE: ${{ inputs.secondary-module }}
+        FLAVOR: ${{ inputs.build-flavor }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+
+    - name: "Android Lint (tertiary)"
+      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
+      run: ./gradlew ":${MODULE}:lintDebug"
+      env:
+        MODULE: ${{ inputs.tertiary-module }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
 
   # =============================================================================
   # Security Scan (OWASP MASVS)
@@ -210,6 +295,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-changes]
     if: needs.detect-changes.outputs.source == 'true' || needs.detect-changes.outputs.build-config == 'true'
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.caching=true"
     steps:
     - uses: actions/checkout@v4
       with:
@@ -232,7 +319,7 @@ jobs:
         "$SCRIPT_PATH"
 
     - name: OWASP Dependency Check
-      if: inputs.run-owasp && needs.detect-changes.outputs.build-config == 'true'
+      if: inputs.run-owasp && needs.detect-changes.outputs.deps-changed == 'true'
       run: ./gradlew dependencyCheckAnalyze || true
       continue-on-error: true
 
@@ -446,88 +533,15 @@ jobs:
         retention-days: 14
 
   # =============================================================================
-  # Code Quality - per-module ktlint and lint
-  # =============================================================================
-  code-quality:
-    name: Code Quality
-    runs-on: ubuntu-latest
-    needs: [detect-changes]
-    if: needs.detect-changes.outputs.source == 'true'
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK
-      uses: actions/setup-java@v4
-      with:
-        java-version: ${{ inputs.java-version }}
-        distribution: 'temurin'
-        cache: gradle
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-
-    - name: "Ktlint Check (primary)"
-      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
-      run: |
-        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
-          ./gradlew ":${MODULE}:ktlintCheck"
-        else
-          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
-        fi
-      env:
-        MODULE: ${{ inputs.primary-module }}
-
-    - name: "Ktlint Check (secondary)"
-      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: |
-        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
-          ./gradlew ":${MODULE}:ktlintCheck"
-        else
-          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
-        fi
-      env:
-        MODULE: ${{ inputs.secondary-module }}
-
-    - name: "Ktlint Check (tertiary)"
-      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: |
-        if ./gradlew tasks --all 2>/dev/null | grep -q ":${MODULE}:ktlintCheck"; then
-          ./gradlew ":${MODULE}:ktlintCheck"
-        else
-          echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
-        fi
-      env:
-        MODULE: ${{ inputs.tertiary-module }}
-
-    - name: "Android Lint (primary)"
-      if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
-      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
-      env:
-        MODULE: ${{ inputs.primary-module }}
-        FLAVOR: ${{ inputs.build-flavor }}
-        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
-
-    - name: "Android Lint (secondary)"
-      if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:lint${FLAVOR}Debug"
-      env:
-        MODULE: ${{ inputs.secondary-module }}
-        FLAVOR: ${{ inputs.build-flavor }}
-        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
-
-    - name: "Android Lint (tertiary)"
-      if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
-      run: ./gradlew ":${MODULE}:lintDebug"
-      env:
-        MODULE: ${{ inputs.tertiary-module }}
-        ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
-
-  # =============================================================================
   # Unit Tests - per-module with optional pre-test script
   # =============================================================================
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
-    needs: [detect-changes, code-quality]
+    needs: [detect-changes, quality-gate]
     if: needs.detect-changes.outputs.source == 'true'
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.caching=true"
     steps:
     - uses: actions/checkout@v4
     - name: Set up JDK
@@ -602,7 +616,7 @@ jobs:
   deploy-firebase:
     name: Deploy to Firebase (develop)
     runs-on: ubuntu-latest
-    needs: [detect-changes, test, security-scan, secret-detection]
+    needs: [detect-changes, test, security-scan, quality-gate]
     if: |
       always() &&
       inputs.deploy-module != '' && inputs.firebase-app-id != '' &&
@@ -611,7 +625,9 @@ jobs:
       (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
-      (needs.secret-detection.result == 'success' || needs.secret-detection.result == 'skipped')
+      (needs.quality-gate.result == 'success' || needs.quality-gate.result == 'skipped')
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.caching=true"
     steps:
     - uses: actions/checkout@v4
     - name: Set up JDK
@@ -735,7 +751,7 @@ jobs:
   deploy-firebase-wear:
     name: Deploy Wear OS to Firebase (develop)
     runs-on: ubuntu-latest
-    needs: [detect-changes, test, security-scan, secret-detection]
+    needs: [detect-changes, test, security-scan, quality-gate]
     if: |
       always() &&
       inputs.deploy-wear-module != '' && inputs.firebase-wear-app-id != '' &&
@@ -744,7 +760,9 @@ jobs:
       (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
-      (needs.secret-detection.result == 'success' || needs.secret-detection.result == 'skipped')
+      (needs.quality-gate.result == 'success' || needs.quality-gate.result == 'skipped')
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.caching=true"
     steps:
     - uses: actions/checkout@v4
     - name: Set up JDK
@@ -853,7 +871,7 @@ jobs:
   deploy-play-console:
     name: Deploy to Play Console (main)
     runs-on: ubuntu-latest
-    needs: [detect-changes, test, security-scan, secret-detection]
+    needs: [detect-changes, test, security-scan, quality-gate]
     if: |
       always() &&
       inputs.deploy-module != '' && inputs.play-package-name != '' &&
@@ -862,7 +880,9 @@ jobs:
       (needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true') &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') &&
-      (needs.secret-detection.result == 'success' || needs.secret-detection.result == 'skipped')
+      (needs.quality-gate.result == 'success' || needs.quality-gate.result == 'skipped')
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.caching=true"
     steps:
     - name: Check Release Secrets
       run: |

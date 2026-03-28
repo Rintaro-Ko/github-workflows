@@ -43,6 +43,10 @@ on:
         description: 'Android package name for Play Console upload (e.g., com.example.app). Empty to skip.'
         default: ''
         type: string
+      play-tracks:
+        description: 'Comma-separated Play Console tracks to upload AAB (e.g., internal,alpha). Default: internal only.'
+        default: 'internal'
+        type: string
       run-owasp:
         description: 'Run OWASP Dependency Check'
         default: false
@@ -893,14 +897,23 @@ jobs:
         echo "AAB_PATH=${AAB_FILE}" >> "$GITHUB_ENV"
       env:
         DEPLOY_MODULE: ${{ inputs.deploy-module }}
-    - name: Upload AAB to Play Console Internal Testing
-      if: env.SKIP_RELEASE != 'true'
+    - name: Upload AAB to Play Console (Internal Testing)
+      if: env.SKIP_RELEASE != 'true' && contains(inputs.play-tracks, 'internal')
       uses: r0adkll/upload-google-play@v1
       with:
         serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT }}
         packageName: ${{ inputs.play-package-name }}
         releaseFiles: ${{ env.AAB_PATH }}
         track: internal
+        status: completed
+    - name: Upload AAB to Play Console (Closed Testing)
+      if: env.SKIP_RELEASE != 'true' && contains(inputs.play-tracks, 'alpha')
+      uses: r0adkll/upload-google-play@v1
+      with:
+        serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT }}
+        packageName: ${{ inputs.play-package-name }}
+        releaseFiles: ${{ env.AAB_PATH }}
+        track: alpha
         status: completed
     - name: Clean up Keystore
       if: always() && env.SKIP_RELEASE != 'true'

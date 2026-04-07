@@ -235,7 +235,7 @@ jobs:
       if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
       run: |
         OUTPUT=$(./gradlew ":${MODULE}:ktlintCheck" 2>&1) && exit 0
-        if echo "$OUTPUT" | grep -q "Task.*not found"; then
+        if echo "$OUTPUT" | grep -qE "not found|Cannot locate tasks"; then
           echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
         else
           echo "$OUTPUT"
@@ -248,7 +248,7 @@ jobs:
       if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
       run: |
         OUTPUT=$(./gradlew ":${MODULE}:ktlintCheck" 2>&1) && exit 0
-        if echo "$OUTPUT" | grep -q "Task.*not found"; then
+        if echo "$OUTPUT" | grep -qE "not found|Cannot locate tasks"; then
           echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
         else
           echo "$OUTPUT"
@@ -261,7 +261,7 @@ jobs:
       if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
       run: |
         OUTPUT=$(./gradlew ":${MODULE}:ktlintCheck" 2>&1) && exit 0
-        if echo "$OUTPUT" | grep -q "Task.*not found"; then
+        if echo "$OUTPUT" | grep -qE "not found|Cannot locate tasks"; then
           echo "::warning::ktlintCheck task not found for ${MODULE}, skipping"
         else
           echo "$OUTPUT"

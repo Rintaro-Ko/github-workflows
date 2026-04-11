@@ -1,0 +1,294 @@
+name: Android QA Review (LLM)
+
+# QA エンジニア観点で実装をレビューする再利用可能ワークフロー。
+# android-security-llm.yml のセキュリティ向け 4-persona パターンを QA 向けに転用。
+#
+# 4 persona:
+#   1) Junior QA Engineer       — テスト網羅性、境界値、null/空ケース、回帰チェック
+#   2) Senior QA Engineer       — 状態遷移、並行性、エラーパス、ユーザシナリオ、データ整合性
+#   3) Lead QA Architect        — テスト戦略、自動化レイヤ、テスタビリティ、QA 負債、最終ゲート
+#   4) Accessibility/UX Auditor — WCAG 2.2 / Android アクセシビリティ / モバイル UX 規範
+
+on:
+  workflow_call:
+    inputs:
+      scan-mode:
+        description: "Scan mode: differential (push) or full (weekly cron)"
+        required: true
+        type: string
+        default: "differential"
+      primary-module:
+        description: "Primary module name"
+        required: false
+        type: string
+        default: "app"
+      secondary-module:
+        description: "Secondary module name"
+        required: false
+        type: string
+        default: ""
+      tertiary-module:
+        description: "Tertiary module name"
+        required: false
+        type: string
+        default: ""
+      fail-on-blocker:
+        description: "Fail workflow if a BLOCKER finding exists"
+        required: false
+        type: boolean
+        default: false
+      coverage-threshold:
+        description: "Minimum diff line coverage % the QA review will flag against"
+        required: false
+        type: string
+        default: "80"
+    outputs:
+      gate-decision:
+        description: "PASS, CONDITIONAL, or FAIL"
+        value: ${{ jobs.aggregate.outputs.decision }}
+      findings-count:
+        description: "Total number of QA findings"
+        value: ${{ jobs.aggregate.outputs.findings-count }}
+
+jobs:
+  collect-context:
+    name: Collect QA Context
+    runs-on: ubuntu-latest
+    outputs:
+      has-changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect changes and collect context
+        id: check
+        env:
+          SCAN_MODE: ${{ inputs.scan-mode }}
+          PRIMARY_MODULE: ${{ inputs.primary-module }}
+          SECONDARY_MODULE: ${{ inputs.secondary-module }}
+          TERTIARY_MODULE: ${{ inputs.tertiary-module }}
+        run: |
+          mkdir -p /tmp/qa-context
+          MODULES="$PRIMARY_MODULE"
+          [ -n "$SECONDARY_MODULE" ] && MODULES="$MODULES $SECONDARY_MODULE"
+          [ -n "$TERTIARY_MODULE" ] && MODULES="$MODULES $TERTIARY_MODULE"
+          if [ "$SCAN_MODE" = "differential" ]; then
+            CHANGED=$(git diff --name-only HEAD~1 -- '*.kt' '*.java' '*.xml' '*.gradle.kts' 2>/dev/null || echo "")
+            if [ -z "$CHANGED" ]; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            git diff HEAD~1 -- '*.kt' '*.java' '*.xml' '*.gradle.kts' > /tmp/qa-context/diff.patch 2>/dev/null || true
+            echo "$CHANGED" | while read -r file; do
+              if [ -f "$file" ]; then
+                echo "--- $file ---" >> /tmp/qa-context/source.txt
+                cat "$file" >> /tmp/qa-context/source.txt
+                echo "" >> /tmp/qa-context/source.txt
+              fi
+            done
+            echo "$CHANGED" | grep -E '/(main)/' | while read -r src; do
+              test_file=$(echo "$src" | sed 's|/main/|/test/|')
+              base=$(basename "$src" .kt)
+              dir=$(dirname "$test_file")
+              for cand in "$dir/${base}Test.kt" "$dir/${base}KtTest.kt"; do
+                if [ -f "$cand" ]; then
+                  echo "--- $cand ---" >> /tmp/qa-context/tests.txt
+                  cat "$cand" >> /tmp/qa-context/tests.txt
+                fi
+              done
+            done
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            for MODULE in $MODULES; do
+              for DIR in src/main/java src/main/kotlin src/test/java src/test/kotlin; do
+                if [ -d "$MODULE/$DIR" ]; then
+                  find "$MODULE/$DIR" \( -name "*.kt" -o -name "*.java" \) | head -40 | while read -r f; do
+                    echo "--- $f ---" >> /tmp/qa-context/source.txt
+                    head -200 "$f" >> /tmp/qa-context/source.txt
+                  done
+                fi
+              done
+            done
+          fi
+          for f in diff.patch source.txt tests.txt; do
+            if [ -f "/tmp/qa-context/$f" ]; then
+              head -c 40000 "/tmp/qa-context/$f" > "/tmp/qa-context/${f}.t" && mv "/tmp/qa-context/${f}.t" "/tmp/qa-context/$f"
+            fi
+          done
+          [ ! -f /tmp/qa-context/source.txt ]   && echo "(no source files)" > /tmp/qa-context/source.txt
+          [ ! -f /tmp/qa-context/diff.patch ]   && echo "(no diff)"          > /tmp/qa-context/diff.patch
+          [ ! -f /tmp/qa-context/tests.txt ]    && echo "(no sibling tests found)" > /tmp/qa-context/tests.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qa-context
+          path: /tmp/qa-context/
+          retention-days: 7
+
+  deterministic-qa:
+    name: Deterministic QA Signals
+    runs-on: ubuntu-latest
+    needs: [collect-context]
+    if: needs.collect-context.outputs.has-changes == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Compute deterministic QA signals
+        run: |
+          mkdir -p /tmp/qa-determ
+          {
+            echo "## Deterministic QA Signals"
+            echo
+            CHANGED=$(git diff --name-only HEAD~1 -- '*.kt' '*.java' 2>/dev/null || true)
+            echo "### Changed source files"
+            echo "$CHANGED" | sed 's/^/- /'
+            echo
+            ADDED_MAIN=$(echo "$CHANGED" | grep '/src/main/' | wc -l | tr -d ' ')
+            ADDED_TEST=$(echo "$CHANGED" | grep '/src/test/' | wc -l | tr -d ' ')
+            echo "### Test density"
+            echo "- main files touched: $ADDED_MAIN"
+            echo "- test files touched: $ADDED_TEST"
+            if [ "$ADDED_MAIN" -gt 0 ] && [ "$ADDED_TEST" -eq 0 ]; then
+              echo "- WARN main を変更したが test は無編集"
+            fi
+            echo
+            echo "### Smell scan"
+            for f in $CHANGED; do
+              [ -f "$f" ] || continue
+              grep -nE 'TODO[^(]|FIXME[^(]|HACK' "$f" | head -3 | sed "s|^|$f: |" || true
+              if echo "$f" | grep -q '/src/main/'; then
+                grep -nE '!![^=]' "$f" | head -3 | sed "s|^|$f: not-null: |" || true
+              fi
+              grep -n 'printStackTrace' "$f" | head -3 | sed "s|^|$f: |" || true
+              grep -nE 'catch\s*\([^)]*\)\s*\{\s*\}' "$f" | head -3 | sed "s|^|$f: empty-catch: |" || true
+            done
+          } > /tmp/qa-determ/findings.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qa-deterministic
+          path: /tmp/qa-determ/
+          retention-days: 7
+
+  llm-qa-review:
+    name: LLM Multi-Persona QA Review
+    needs: [collect-context, deterministic-qa]
+    if: needs.collect-context.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      gate-decision: ${{ steps.review.outputs.gate_decision }}
+      findings-count: ${{ steps.review.outputs.findings_count }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: qa-context
+          path: /tmp/qa-context/
+      - uses: actions/download-artifact@v4
+        with:
+          name: qa-deterministic
+          path: /tmp/qa-determ/
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Execute 4-persona QA review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SCAN_MODE: ${{ inputs.scan-mode }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage-threshold }}
+        run: |
+          DIFF=$(cat /tmp/qa-context/diff.patch 2>/dev/null | head -c 30000 || echo "(none)")
+          SOURCE=$(cat /tmp/qa-context/source.txt 2>/dev/null | head -c 30000 || echo "(empty)")
+          TESTS=$(cat /tmp/qa-context/tests.txt  2>/dev/null | head -c 20000 || echo "(none)")
+          DETERM=$(cat /tmp/qa-determ/findings.txt 2>/dev/null || echo "(none)")
+          COMMON_SUFFIX='Output ONLY valid JSON: {"verdict":"APPROVE|REJECT|CONDITIONAL","findings":[{"id":"Q-001","category":"test_coverage|edge_case|state_machine|error_handling|accessibility|ux|regression_risk|testability","severity":"BLOCKER|CRITICAL|MAJOR|MINOR|INFO","title":"...","description":"...","affected_files":[],"recommendation":"...","missing_test_case":"","confidence":"HIGH|MEDIUM|LOW"}],"summary":"..."}'
+          if [ "$SCAN_MODE" = "differential" ]; then
+            MODEL_MID="haiku"; MODEL_LEAD="sonnet"
+          else
+            MODEL_MID="sonnet"; MODEL_LEAD="opus"
+          fi
+          echo "Running junior QA review..."
+          JUNIOR_RESULT=$(claude -p --model "$MODEL_MID" --output-format json \
+            "You are a junior QA engineer (1-3yr) at a Japanese mobile app company. Review this diff for: (1) missing unit tests for new public functions, (2) untested boundary values (null, empty, max, negative, zero), (3) untested error paths (catch blocks, suspend cancel), (4) regression risk vs surrounding code. Coverage threshold: ${COVERAGE_THRESHOLD}% on diff lines. Deterministic signals: $DETERM --- Diff: $DIFF --- Existing tests: $TESTS --- $COMMON_SUFFIX" \
+            2>/dev/null || echo '{"verdict":"REJECT","findings":[],"summary":"Junior review failed"}')
+          echo "Running senior QA review..."
+          SENIOR_RESULT=$(claude -p --model sonnet --output-format json \
+            "You are a senior QA engineer (8yr+) specializing in Android. Focus on: state machine correctness (StateFlow/UDF), coroutine cancellation safety, ANR risk, race conditions, lifecycle awareness (onPause/onResume), data consistency between Room/DataStore/network, integration test gaps. Review junior findings for false positives. Junior: $JUNIOR_RESULT --- Diff: $DIFF --- Source: $SOURCE --- $COMMON_SUFFIX Flag MAJOR and above only." \
+            2>/dev/null || echo '{"verdict":"REJECT","findings":[],"summary":"Senior review failed"}')
+          echo "Running lead QA architect review..."
+          LEAD_RESULT=$(claude -p --model "$MODEL_LEAD" --output-format json \
+            "You are the Lead QA Architect and FINAL APPROVER. Assess: (1) testability of new code (DI, pure functions, side-effect isolation), (2) appropriate test pyramid layer (unit vs UI vs E2E vs manual), (3) flaky test risk, (4) QA debt accumulation, (5) regression test surface area. Verdict is binding. REJECT if BLOCKER unmitigated, CONDITIONAL if CRITICAL with remediation. Junior: $JUNIOR_RESULT --- Senior: $SENIOR_RESULT --- $COMMON_SUFFIX" \
+            2>/dev/null || echo '{"verdict":"REJECT","findings":[],"summary":"Lead review failed"}')
+          echo "Running accessibility/UX audit..."
+          A11Y_RESULT=$(claude -p --model sonnet --output-format json \
+            "You are an Accessibility and Mobile UX auditor (Android + WCAG 2.2). Check the diff for: (1) Compose composables missing contentDescription / semantics / Modifier.semantics, (2) touch targets less than 48dp, (3) color-only state encoding, (4) dynamic font scale support, (5) RTL safety, (6) TalkBack reading order, (7) error messages that aren't actionable, (8) loading states without aria-busy equivalent. Source: $SOURCE --- Diff: $DIFF --- $COMMON_SUFFIX Category: accessibility or ux only." \
+            2>/dev/null || echo '{"verdict":"CONDITIONAL","findings":[],"summary":"A11Y review incomplete"}')
+          GATE="PASS"
+          for RESULT_VAR in "$JUNIOR_RESULT" "$SENIOR_RESULT" "$LEAD_RESULT" "$A11Y_RESULT"; do
+            V=$(echo "$RESULT_VAR" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('verdict','REJECT'))" 2>/dev/null || echo "REJECT")
+            [ "$V" = "REJECT" ] && GATE="FAIL" && break
+            [ "$V" = "CONDITIONAL" ] && GATE="CONDITIONAL"
+          done
+          TOTAL=0
+          for RESULT_VAR in "$JUNIOR_RESULT" "$SENIOR_RESULT" "$LEAD_RESULT" "$A11Y_RESULT"; do
+            C=$(echo "$RESULT_VAR" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('findings',[])))" 2>/dev/null || echo "0")
+            TOTAL=$((TOTAL + C))
+          done
+          echo "gate_decision=$GATE" >> "$GITHUB_OUTPUT"
+          echo "findings_count=$TOTAL" >> "$GITHUB_OUTPUT"
+          JR_V=$(echo "$JUNIOR_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          SR_V=$(echo "$SENIOR_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          LD_V=$(echo "$LEAD_RESULT"   | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          A11_V=$(echo "$A11Y_RESULT"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','ERROR'))" 2>/dev/null || echo "ERROR")
+          {
+            echo "# QA Review Report"
+            echo
+            echo "**Mode**: $SCAN_MODE | **Gate**: $GATE | **Findings**: $TOTAL"
+            echo
+            echo "| Persona | Verdict |"
+            echo "|---------|---------|"
+            echo "| Junior QA Engineer        | $JR_V |"
+            echo "| Senior QA Engineer        | $SR_V |"
+            echo "| Lead QA Architect (Final) | $LD_V |"
+            echo "| Accessibility / UX Auditor| $A11_V |"
+          } > /tmp/qa-report.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qa-review-report
+          path: /tmp/qa-report.md
+          retention-days: 14
+      - name: Append to job summary
+        if: always()
+        run: cat /tmp/qa-report.md >> "$GITHUB_STEP_SUMMARY"
+
+  aggregate:
+    name: QA Gate Decision
+    needs: [collect-context, llm-qa-review]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.gate.outputs.decision }}
+      findings-count: ${{ steps.gate.outputs.findings }}
+    steps:
+      - name: Gate
+        id: gate
+        env:
+          HAS_CHANGES: ${{ needs.collect-context.outputs.has-changes }}
+          DECISION: ${{ needs.llm-qa-review.outputs.gate-decision }}
+          COUNT: ${{ needs.llm-qa-review.outputs.findings-count }}
+          FAIL_BLOCKER: ${{ inputs.fail-on-blocker }}
+        run: |
+          if [ "$HAS_CHANGES" != "true" ]; then
+            echo "decision=PASS" >> "$GITHUB_OUTPUT"
+            echo "findings=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::QA review skipped (no source changes)"
+            exit 0
+          fi
+          echo "decision=${DECISION:-PASS}" >> "$GITHUB_OUTPUT"
+          echo "findings=${COUNT:-0}" >> "$GITHUB_OUTPUT"
+          if [ "$DECISION" = "FAIL" ] && [ "$FAIL_BLOCKER" = "true" ]; then
+            echo "::error::QA review found blocker findings"
+            exit 1
+          fi
+          if [ "$DECISION" = "FAIL" ]; then
+            echo "::warning::QA review found blocker findings (advisory mode)"
+          fi

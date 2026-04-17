@@ -282,6 +282,8 @@ jobs:
         MODULE: ${{ inputs.primary-module }}
         FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_DEBUG: ${{ secrets.MAPS_API_KEY_DEBUG || secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_RELEASE: ${{ secrets.MAPS_API_KEY_RELEASE || secrets.MAPS_API_KEY }}
 
     - name: "Android Lint (secondary)"
       if: inputs.secondary-module != '' && (needs.detect-changes.outputs.secondary == 'true' || needs.detect-changes.outputs.build-config == 'true')
@@ -290,6 +292,8 @@ jobs:
         MODULE: ${{ inputs.secondary-module }}
         FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_DEBUG: ${{ secrets.MAPS_API_KEY_DEBUG || secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_RELEASE: ${{ secrets.MAPS_API_KEY_RELEASE || secrets.MAPS_API_KEY }}
 
     - name: "Android Lint (tertiary)"
       if: inputs.tertiary-module != '' && (needs.detect-changes.outputs.tertiary == 'true' || needs.detect-changes.outputs.build-config == 'true')
@@ -297,6 +301,8 @@ jobs:
       env:
         MODULE: ${{ inputs.tertiary-module }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_DEBUG: ${{ secrets.MAPS_API_KEY_DEBUG || secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_RELEASE: ${{ secrets.MAPS_API_KEY_RELEASE || secrets.MAPS_API_KEY }}
 
   # =============================================================================
   # Security Scan (OWASP MASVS)
@@ -653,6 +659,8 @@ jobs:
         MODULE: ${{ inputs.deploy-module }}
         FLAVOR: ${{ inputs.release-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_DEBUG: ${{ secrets.MAPS_API_KEY_DEBUG || secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_RELEASE: ${{ secrets.MAPS_API_KEY_RELEASE || secrets.MAPS_API_KEY }}
         MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
         KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -665,6 +673,8 @@ jobs:
         MODULE: ${{ inputs.deploy-module }}
         FLAVOR: ${{ inputs.build-flavor }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_DEBUG: ${{ secrets.MAPS_API_KEY_DEBUG || secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_RELEASE: ${{ secrets.MAPS_API_KEY_RELEASE || secrets.MAPS_API_KEY }}
         MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
     - name: Set APK path
       run: |
@@ -903,6 +913,8 @@ jobs:
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         ORG_GRADLE_PROJECT_MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_DEBUG: ${{ secrets.MAPS_API_KEY_DEBUG || secrets.MAPS_API_KEY }}
+        ORG_GRADLE_PROJECT_MAPS_API_KEY_RELEASE: ${{ secrets.MAPS_API_KEY_RELEASE || secrets.MAPS_API_KEY }}
         MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
     - name: Find AAB path
       if: env.SKIP_RELEASE != 'true'

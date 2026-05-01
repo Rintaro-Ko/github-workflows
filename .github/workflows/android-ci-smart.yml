@@ -91,6 +91,10 @@ on:
         description: 'Space-separated paths to privacy policy HTML files'
         default: ''
         type: string
+      runner:
+        description: 'Runner label for all jobs (e.g., ubuntu-latest, self-hosted). Default: ubuntu-latest.'
+        default: 'ubuntu-latest'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -102,7 +106,7 @@ jobs:
   # =============================================================================
   detect-changes:
     name: "Detect Changes"
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     outputs:
       primary: ${{ steps.filter.outputs.primary }}
       secondary: ${{ steps.filter.outputs.secondary }}
@@ -202,7 +206,7 @@ jobs:
   # =============================================================================
   quality-gate:
     name: Quality Gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [detect-changes]
     if: |
       inputs.mode != 'deploy' && (needs.detect-changes.outputs.source == 'true' || needs.detect-changes.outputs.ci-config == 'true')
@@ -309,7 +313,7 @@ jobs:
   # =============================================================================
   security-scan:
     name: "Security Scan (OWASP MASVS)"
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [detect-changes]
     if: |
       inputs.mode != 'deploy' && (needs.detect-changes.outputs.source == 'true' || needs.detect-changes.outputs.build-config == 'true')
@@ -532,7 +536,7 @@ jobs:
   # =============================================================================
   test:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [detect-changes, quality-gate]
     if: |
       inputs.mode != 'deploy' && (needs.detect-changes.outputs.source == 'true')
@@ -611,7 +615,7 @@ jobs:
   # =============================================================================
   deploy-firebase:
     name: Deploy to Firebase (develop)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [detect-changes, test, security-scan, quality-gate]
     if: |
       inputs.mode != 'check' && (
@@ -736,7 +740,7 @@ jobs:
   # =============================================================================
   deploy-firebase-wear:
     name: Deploy Wear OS to Firebase (develop)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [detect-changes, test, security-scan, quality-gate]
     if: |
       inputs.mode != 'check' && (
@@ -858,7 +862,7 @@ jobs:
   # =============================================================================
   deploy-play-console:
     name: Deploy to Play Console (main)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [detect-changes, test, security-scan, quality-gate]
     if: |
       inputs.mode != 'check' && (

@@ -125,75 +125,56 @@ jobs:
         SECONDARY: ${{ inputs.secondary-module }}
         TERTIARY: ${{ inputs.tertiary-module }}
       run: |
+        cat > /tmp/filters.yml <<'FILTERSEOF'
+        primary:
+          - '${PRIMARY}/src/**'
+          - '${PRIMARY}/build.gradle.kts'
+          - '${PRIMARY}/proguard-rules.pro'
+        secondary:
+          - '${SECONDARY}/src/**'
+          - '${SECONDARY}/build.gradle.kts'
+        tertiary:
+          - '${TERTIARY}/src/**'
+          - '${TERTIARY}/build.gradle.kts'
+        source:
+          - '${PRIMARY}/src/**'
+          - '${PRIMARY}/build.gradle.kts'
+          - '${SECONDARY}/src/**'
+          - '${SECONDARY}/build.gradle.kts'
+          - '${TERTIARY}/src/**'
+          - '${TERTIARY}/build.gradle.kts'
+          - '*.gradle.kts'
+          - 'gradle/**'
+        build-config:
+          - '*.gradle.kts'
+          - 'gradle/**'
+          - 'gradle.properties'
+          - 'settings.gradle.kts'
+        ci-config:
+          - '.github/**'
+        docs-only:
+          - '**.md'
+          - 'docs/**'
+          - 'LICENSE'
+          - '.gitignore'
+        deps-changed:
+          - 'gradle/libs.versions.toml'
+          - '**/build.gradle.kts'
+          - 'gradle/wrapper/**'
+        FILTERSEOF
+
+        # Substitute environment variables in the template
+        sed -e "s|\${PRIMARY}|${PRIMARY}|g" \
+            -e "s|\${SECONDARY}|${SECONDARY}|g" \
+            -e "s|\${TERTIARY}|${TERTIARY}|g" \
+            /tmp/filters.yml > /tmp/filters-expanded.yml
+
+        # Output as single line for GITHUB_OUTPUT
+        FILTERS=$(cat /tmp/filters-expanded.yml | tr '\n' ' ')
         {
-        echo "filters<<EOF"
-
-        # Primary module (always present)
-        echo "primary:"
-        echo "  - '${PRIMARY}/src/**'"
-        echo "  - '${PRIMARY}/build.gradle.kts'"
-        echo "  - '${PRIMARY}/proguard-rules.pro'"
-
-        # Secondary module (optional)
-        if [ -n "$SECONDARY" ]; then
-          echo "secondary:"
-          echo "  - '${SECONDARY}/src/**'"
-          echo "  - '${SECONDARY}/build.gradle.kts'"
-        else
-          echo "secondary:"
-          echo "  - '__no_secondary_module__'"
-        fi
-
-        # Tertiary module (optional)
-        if [ -n "$TERTIARY" ]; then
-          echo "tertiary:"
-          echo "  - '${TERTIARY}/src/**'"
-          echo "  - '${TERTIARY}/build.gradle.kts'"
-        else
-          echo "tertiary:"
-          echo "  - '__no_tertiary_module__'"
-        fi
-
-        # Source aggregate (any module source or build config)
-        echo "source:"
-        echo "  - '${PRIMARY}/src/**'"
-        echo "  - '${PRIMARY}/build.gradle.kts'"
-        if [ -n "$SECONDARY" ]; then
-          echo "  - '${SECONDARY}/src/**'"
-          echo "  - '${SECONDARY}/build.gradle.kts'"
-        fi
-        if [ -n "$TERTIARY" ]; then
-          echo "  - '${TERTIARY}/src/**'"
-          echo "  - '${TERTIARY}/build.gradle.kts'"
-        fi
-        echo "  - '*.gradle.kts'"
-        echo "  - 'gradle/**'"
-
-        # Build config
-        echo "build-config:"
-        echo "  - '*.gradle.kts'"
-        echo "  - 'gradle/**'"
-        echo "  - 'gradle.properties'"
-        echo "  - 'settings.gradle.kts'"
-
-        # CI config
-        echo "ci-config:"
-        echo "  - '.github/**'"
-
-        # Docs only (markdown, docs, and non-code files)
-        echo "docs-only:"
-        echo "  - '**.md'"
-        echo "  - 'docs/**'"
-        echo "  - 'LICENSE'"
-        echo "  - '.gitignore'"
-
-        # Dependency files
-        echo "deps-changed:"
-        echo "  - 'gradle/libs.versions.toml'"
-        echo "  - '**/build.gradle.kts'"
-        echo "  - 'gradle/wrapper/**'"
-
-        echo "EOF"
+          echo "filters<<EOF"
+          cat /tmp/filters-expanded.yml
+          echo "EOF"
         } >> "$GITHUB_OUTPUT"
 
     - uses: dorny/paths-filter@v3

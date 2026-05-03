@@ -239,6 +239,19 @@ jobs:
         cache: gradle
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
+    - name: "Setup local.properties"
+      run: |
+        if [ ! -f local.properties ]; then
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          [ -z "$SDK_DIR" ] && [ -d "${HOME}/Library/Android/sdk" ] && SDK_DIR="${HOME}/Library/Android/sdk"
+          [ -z "$SDK_DIR" ] && [ -d "/usr/local/lib/android/sdk" ] && SDK_DIR="/usr/local/lib/android/sdk"
+          if [ -n "$SDK_DIR" ]; then
+            echo "sdk.dir=${SDK_DIR}" > local.properties
+            echo "✅ local.properties generated: sdk.dir=${SDK_DIR}"
+          else
+            echo "⚠️ Android SDK not found — local.properties not generated"
+          fi
+        fi
     - name: "Pre-build setup"
       if: inputs.pre-test-script != ''
       env:
@@ -557,6 +570,19 @@ jobs:
         cache: gradle
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
+    - name: "Setup local.properties"
+      run: |
+        if [ ! -f local.properties ]; then
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          [ -z "$SDK_DIR" ] && [ -d "${HOME}/Library/Android/sdk" ] && SDK_DIR="${HOME}/Library/Android/sdk"
+          [ -z "$SDK_DIR" ] && [ -d "/usr/local/lib/android/sdk" ] && SDK_DIR="/usr/local/lib/android/sdk"
+          if [ -n "$SDK_DIR" ]; then
+            echo "sdk.dir=${SDK_DIR}" > local.properties
+            echo "✅ local.properties generated: sdk.dir=${SDK_DIR}"
+          else
+            echo "⚠️ Android SDK not found — local.properties not generated"
+          fi
+        fi
 
     - name: Pre-test setup
       if: inputs.pre-test-script != ''

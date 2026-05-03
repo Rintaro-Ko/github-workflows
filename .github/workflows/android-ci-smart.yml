@@ -239,6 +239,11 @@ jobs:
         cache: gradle
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
+    - name: "Pre-build setup"
+      if: inputs.pre-test-script != ''
+      env:
+        SCRIPT: ${{ inputs.pre-test-script }}
+      run: eval "$SCRIPT"
 
     - name: "Ktlint Check (primary)"
       if: needs.detect-changes.outputs.primary == 'true' || needs.detect-changes.outputs.build-config == 'true'
